@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Generated audio / models
+*.wav
+*.mp3
+*.m4b
+models/
+.cache/
+
+# IDE
+.idea/
+.vscode/

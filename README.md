@@ -1,9 +1,15 @@
 # ZabAudioBooker
 
-Offline AI text-to-speech in Python, powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
+Offline AI text-to-speech powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
 (82M parameters, Apache-2.0). Runs fully offline once the weights are cached and
 takes advantage of an NVIDIA GPU (developed against an RTX 4050) with a clean
 CPU fallback.
+
+Two ways in:
+
+- **`zabaudiobooker.py`** — Python CLI. Plain text in, WAV or MP3 out.
+- **`zabaudiobooker.html`** — a single page you open in a browser. Markdown in,
+  a chaptered audiobook out. No Python, no install; Kokoro runs client-side.
 
 ## Features
 
@@ -56,7 +62,7 @@ pip install -r requirements.txt
 The Kokoro model weights (~330 MB) are downloaded from Hugging Face on first
 run and cached under `~/.cache/huggingface`. After that, no network is needed.
 
-## Usage
+## Usage — CLI
 
 ```bash
 # Text file → WAV (CUDA used automatically when available)
@@ -115,11 +121,72 @@ The CLI prints an RTF readout after every chunk so you can see throughput live:
 
 (`RTF=0.05x` ≈ 20× faster than real-time.)
 
+## Browser version — Markdown to audiobook
+
+`zabaudiobooker.html` is self-contained: open it in a browser, drop in a `.md`
+file, and get audio back. It runs the same Kokoro-82M model and the same voice
+IDs as the CLI, but through ONNX Runtime Web instead of PyTorch. Your document
+never leaves the machine.
+
+```bash
+# Just open it
+xdg-open zabaudiobooker.html        # macOS: open, Windows: start
+
+# Or serve it, which is the more portable route across browsers
+python3 -m http.server 8000
+# then visit http://localhost:8000/zabaudiobooker.html
+```
+
+The first run downloads the model weights from Hugging Face (roughly 90 MB at
+`q8`, up to about 330 MB at `fp32`) and the browser caches them. Everything
+after that is offline. WebGPU is used when the browser exposes it, otherwise it
+falls back to WASM on the CPU.
+
+### What it does with Markdown
+
+The point of the browser version is that it *understands* Markdown rather than
+reading the punctuation out loud. Feeding a `.md` file to the CLI gets you
+"hash hash Introduction"; here the document is parsed into blocks first:
+
+| Markdown | Spoken as |
+| --- | --- |
+| Headings | The title text, with a pause — and the chapter split point |
+| Links | The link text; the URL is dropped |
+| Images | The alt text |
+| Fenced code | Skipped — or announced, or read aloud, your choice |
+| Inline code | Read normally, so `af_heart` stays intact |
+| Lists | One sentence per item; ordered lists can be numbered aloud |
+| Tables | Flattened row-wise to "header: value", or skipped |
+| Blockquotes | Read as ordinary prose |
+| Bare URLs, footnotes (marker and definition), YAML front matter, HTML tags, emoji | Removed |
+
+Use the *Preview the text that will be spoken* panel to see exactly what the
+model will receive before you commit to a long run.
+
+### Output
+
+Pick a heading level to split on and you get one file per chapter plus a
+combined file for the whole book, each with an inline player and a download
+link. MP3 (128 kbps) keeps an audiobook to a sensible size; WAV is 24 kHz mono
+PCM and runs about 170 MB per hour, so prefer MP3 for anything long.
+
+Progress is reported the same way the CLI reports it — audio produced, elapsed
+time, and a live RTF figure — and long runs can be cancelled mid-way.
+
+### Requirements
+
+A current browser and, on first run only, network access to `cdn.jsdelivr.net`
+(for [kokoro-js](https://www.npmjs.com/package/kokoro-js)) and `huggingface.co`
+(for the weights). No build step, no `npm install`, no API key. Audio is held in
+memory while it is generated, so a very long book on a low-memory machine is
+better done a few chapters at a time.
+
 ## Project layout
 
 ```
 .
 ├── zabaudiobooker.py    # CLI entry point
+├── zabaudiobooker.html  # standalone browser app (Markdown -> audiobook)
 ├── requirements.txt     # Python deps (install torch separately, per CUDA version)
 ├── README.md
 └── .gitignore

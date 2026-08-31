@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZabAudioBooker — Markdown to Audiobook</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4;
+    --panel: #ffffff;
+    --ink: #16161a;
+    --muted: #5f6470;
+    --line: #e0e0dc;
+    --accent: #2f6f4f;
+    --accent-ink: #ffffff;
+    --warn-bg: #fff6e0;
+    --warn-line: #e8cf94;
+    --err-bg: #fdeaea;
+    --err-line: #e5b2b2;
+    --err-ink: #8c2b2b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a;
+      --panel: #1e2024;
+      --ink: #e8e8e6;
+      --muted: #9aa0ab;
+      --line: #32353b;
+      --accent: #57a97b;
+      --accent-ink: #0f1512;
+      --warn-bg: #2f2a1c;
+      --warn-line: #5c5233;
+      --err-bg: #33201f;
+      --err-line: #6b3a38;
+      --err-ink: #ef9a9a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 80px; }
+  header h1 { margin: 0 0 4px; font-size: 25px; letter-spacing: -0.02em; }
+  header p { margin: 0; color: var(--muted); }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    margin-top: 18px;
+  }
+  h2 {
+    margin: 0 0 14px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--muted);
+  }
+  .drop {
+    border: 2px dashed var(--line);
+    border-radius: 8px;
+    padding: 26px 16px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .drop strong { color: var(--ink); }
+  textarea {
+    width: 100%;
+    min-height: 130px;
+    margin-top: 12px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 12.5px/1.5 var(--mono);
+    resize: vertical;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px 16px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  select, input[type=number] {
+    width: 100%;
+    padding: 7px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--ink);
+    font: inherit;
+    font-size: 14px;
+  }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 22px; font-size: 14px; }
+  .check input { margin: 0; }
+  button {
+    font: inherit;
+    font-weight: 600;
+    padding: 10px 18px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .bar { height: 7px; background: var(--line); border-radius: 4px; overflow: hidden; margin: 10px 0 6px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .log { font: 12px/1.6 var(--mono); color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  .note {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-line);
+    border-radius: 8px;
+    padding: 11px 13px;
+    margin-top: 18px;
+    font-size: 13.5px;
+  }
+  .err { background: var(--err-bg); border-color: var(--err-line); color: var(--err-ink); }
+  .note code { font: 12px var(--mono); background: rgba(128,128,128,.16); padding: 1px 5px; border-radius: 4px; }
+  .stats { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  pre.preview {
+    margin: 10px 0 0;
+    padding: 12px;
+    max-height: 300px;
+    overflow: auto;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font: 12.5px/1.6 var(--mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .track { border-top: 1px solid var(--line); padding: 12px 0; }
+  .track:first-of-type { border-top: 0; }
+  .track .top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .track b { font-weight: 600; }
+  .track small { color: var(--muted); white-space: nowrap; }
+  .track audio { width: 100%; margin-top: 8px; height: 34px; }
+  a.dl { font-size: 13px; color: var(--accent); text-decoration: none; font-weight: 600; }
+  a.dl:hover { text-decoration: underline; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ZabAudioBooker</h1>
+    <p>Turn a Markdown file into an audiobook. Kokoro-82M runs entirely in your browser — nothing is uploaded.</p>
+  </header>
+
+  <div id="fileHint" class="note hidden">
+    You opened this page straight from your filesystem. That works in Chrome and Edge, model caching
+    included. If your browser blocks the model download from here, serve the folder instead:
+    <code>python3 -m http.server 8000</code>, then open
+    <code>http://localhost:8000/zabaudiobooker.html</code>.
+  </div>
+
+  <div id="fatal" class="note err hidden"></div>
+
+  <section>
+    <h2>1 · Markdown</h2>
+    <div class="drop" id="drop">
+      <strong>Drop a .md file here</strong> or click to choose one — you can also paste below.
+    </div>
+    <input type="file" id="file" accept=".md,.markdown,.mdown,.mkd,.txt,text/markdown,text/plain" class="hidden">
+    <textarea id="md" placeholder="# Chapter One&#10;&#10;Or paste your Markdown straight in here."></textarea>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <section>
+    <h2>2 · Voice &amp; output</h2>
+    <div class="grid">
+      <div>
+        <label for="voice">Voice</label>
+        <select id="voice"></select>
+      </div>
+      <div>
+        <label for="speed">Speed</label>
+        <input type="number" id="speed" value="1" min="0.5" max="2" step="0.05">
+      </div>
+      <div>
+        <label for="format">Format</label>
+        <select id="format">
+          <option value="mp3">MP3 — 128 kbps</option>
+          <option value="wav">WAV — 24 kHz PCM</option>
+        </select>
+      </div>
+      <div>
+        <label for="split">Split into chapters at</label>
+        <select id="split">
+          <option value="1">Heading 1 (#)</option>
+          <option value="2" selected>Heading 2 (##)</option>
+          <option value="0">Don't split</option>
+        </select>
+      </div>
+      <div>
+        <label for="device">Device</label>
+        <select id="device">
+          <option value="auto" selected>Auto</option>
+          <option value="webgpu">WebGPU</option>
+          <option value="wasm">WASM (CPU)</option>
+        </select>
+      </div>
+      <div>
+        <label for="dtype">Precision</label>
+        <select id="dtype">
+          <option value="auto" selected>Auto</option>
+          <option value="fp32">fp32 — largest, best</option>
+          <option value="fp16">fp16</option>
+          <option value="q8">q8 — smallest download</option>
+          <option value="q4">q4</option>
+          <option value="q4f16">q4f16</option>
+        </select>
+      </div>
+      <div>
+        <label for="code">Code blocks</label>
+        <select id="code">
+          <option value="skip" selected>Skip silently</option>
+          <option value="announce">Say "code block omitted"</option>
+          <option value="read">Read aloud</option>
+        </select>
+      </div>
+      <div>
+        <label for="tables">Tables</label>
+        <select id="tables">
+          <option value="flatten" selected>Read as "header: value"</option>
+          <option value="skip">Skip</option>
+        </select>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="numberLists" checked>
+        <label for="numberLists" style="margin:0">Number ordered lists aloud</label>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3 · Generate</h2>
+    <details id="previewBox">
+      <summary>Preview the text that will be spoken</summary>
+      <pre class="preview" id="preview"></pre>
+    </details>
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="go">Generate audiobook</button>
+      <button id="cancel" class="hidden">Cancel</button>
+    </div>
+    <div class="bar hidden" id="barWrap"><i id="bar"></i></div>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section id="results" class="hidden">
+    <h2>4 · Result</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button id="dlAll">Download every file</button>
+    </div>
+    <div id="tracks"></div>
+  </section>
+</div>
+
+<script type="module">
+const SAMPLE_RATE = 24000;
+const MODEL_ID    = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const KOKORO_URL  = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm";
+const LAMEJS_URL  = "https://cdn.jsdelivr.net/npm/@breezystack/lamejs@1.2.7/+esm";
+
+/* ------------------------------------------------------------------ *
+ * Markdown -> speech text.
+ *
+ * Deliberately hand-rolled and dependency-free: this half of the app has
+ * to work (and be testable) without touching the network, and the goal is
+ * speakable prose rather than faithful CommonMark rendering. Rendering to
+ * HTML and taking textContent would read code blocks and URLs out loud.
+ * ------------------------------------------------------------------ */
+
+const RE_FENCE     = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
+const RE_ATX       = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+const RE_HR        = /^\s{0,3}(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/;
+const RE_QUOTE     = /^\s{0,3}>\s?/;
+const RE_ULI       = /^(\s*)[-*+]\s+(.*)$/;
+const RE_OLI       = /^(\s*)\d{1,9}[.)]\s+(.*)$/;
+const RE_TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$/;
+const RE_SETEXT_H1 = /^\s{0,3}=+\s*$/;
+const RE_SETEXT_H2 = /^\s{0,3}-+\s*$/;
+
+const ENTITIES = {
+  "&nbsp;": " ", "&mdash;": "—", "&ndash;": "–", "&hellip;": "…",
+  "&ldquo;": "“", "&rdquo;": "”", "&lsquo;": "‘", "&rsquo;": "’",
+  "&quot;": '"', "&apos;": "'", "&lt;": "<", "&gt;": ">",
+  "&copy;": "©", "&reg;": "®", "&trade;": "™",
+  "&deg;": "°", "&times;": "×",
+};
+
+function decodeEntities(s) {
+  for (const [k, v] of Object.entries(ENTITIES)) s = s.split(k).join(v);
+  s = s.replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d));
+  s = s.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)));
+  return s.split("&amp;").join("&"); // last, so "&amp;lt;" decodes to "&lt;" not "<"
+}
+
+function stripFrontMatter(md) {
+  const m = md.match(/^\uFEFF?(---|\+\+\+)[ \t]*\r?\n([\s\S]*?)\r?\n\1[ \t]*(?:\r?\n|$)/);
+  if (!m) return { body: md.replace(/^\uFEFF/, ""), title: "" };
+  const title = (m[2].match(/^title\s*:\s*(.+)$/mi) || [, ""])[1].trim().replace(/^["']|["']$/g, "");
+  return { body: md.slice(m[0].length), title };
+}
+
+function splitRow(line) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+}
+
+function isBlockStart(line) {
+  return RE_FENCE.test(line) || RE_ATX.test(line) || RE_HR.test(line) ||
+         RE_QUOTE.test(line) || RE_ULI.test(line) || RE_OLI.test(line);
+}
+
+function tokenizeMarkdown(md) {
+  const lines = md.replace(/\r\n?/g, "\n").split("\n");
+  const tokens = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+
+    let m = line.match(RE_FENCE);
+    if (m) {
+      const close = new RegExp("^\\s{0,3}" + m[1][0] + "{" + m[1].length + ",}\\s*$");
+      const lang = m[2].trim().split(/\s+/)[0];
+      const body = [];
+      i++;
+      while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
+      i++; // consume the closing fence; harmless if the file ended unterminated
+      tokens.push({ type: "code", lang, text: body.join("\n") });
+      continue;
+    }
+
+    m = line.match(RE_ATX);
+    if (m) { tokens.push({ type: "heading", level: m[1].length, text: m[2] }); i++; continue; }
+
+    if (RE_HR.test(line)) { tokens.push({ type: "hr" }); i++; continue; }
+
+    // Footnote definitions: the reference is stripped inline, so reading the
+    // definition where it happens to sit would be an orphaned aside.
+    if (/^\s{0,3}\[\^[^\]]*\]:/.test(line)) {
+      i++;
+      while (i < lines.length && lines[i].trim() && /^\s+\S/.test(lines[i])) i++;
+      continue;
+    }
+
+    if (RE_QUOTE.test(line)) {
+      const buf = [];
+      while (i < lines.length && lines[i].trim() && (RE_QUOTE.test(lines[i]) || !isBlockStart(lines[i]))) {
+        buf.push(lines[i].replace(RE_QUOTE, ""));
+        i++;
+      }
+      tokens.push({ type: "quote", tokens: tokenizeMarkdown(buf.join("\n")) });
+      continue;
+    }
+
+    if (line.includes("|") && i + 1 < lines.length && RE_TABLE_SEP.test(lines[i + 1])) {
+      const headers = splitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) rows.push(splitRow(lines[i++]));
+      tokens.push({ type: "table", headers, rows });
+      continue;
+    }
+
+    if (RE_ULI.test(line) || RE_OLI.test(line)) {
+      const ordered = RE_OLI.test(line);
+      const RE_ITEM = ordered ? RE_OLI : RE_ULI;   // a list ends where its marker style changes
+      const items = [];
+      while (i < lines.length) {
+        const im = lines[i].match(RE_ITEM);
+        if (im) {
+          items.push(im[2]);
+          i++;
+          // lazy continuation: indented text that starts no new item or block
+          while (i < lines.length && lines[i].trim() && /^\s+\S/.test(lines[i]) && !isBlockStart(lines[i])) {
+            items[items.length - 1] += " " + lines[i].trim();
+            i++;
+          }
+        } else if (!lines[i].trim() && RE_ITEM.test(lines[i + 1] || "")) {
+          i++; // blank line inside a loose list
+        } else break;
+      }
+      tokens.push({ type: "list", ordered, items });
+      continue;
+    }
+
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) buf.push(lines[i++]);
+    if (buf.length && i < lines.length) {
+      if (RE_SETEXT_H1.test(lines[i])) { tokens.push({ type: "heading", level: 1, text: buf.join(" ") }); i++; continue; }
+      if (RE_SETEXT_H2.test(lines[i])) { tokens.push({ type: "heading", level: 2, text: buf.join(" ") }); i++; continue; }
+    }
+    if (buf.length) tokens.push({ type: "paragraph", text: buf.join(" ") });
+    else i++;
+  }
+  return tokens;
+}
+
+function inlineToSpeech(s, opts = {}) {
+  if (!s) return "";
+
+  const parked = [];
+  const park = v => "\u0000" + (parked.push(v) - 1) + "\u0000";
+  // Park code spans so emphasis and URL stripping cannot chew up their contents,
+  // and backslash escapes so that \* is never read as emphasis.
+  s = s.replace(/(`+)([^`]|[^`][\s\S]*?)\1/g, (_, __, code) => park(code.trim()));
+  s = s.replace(/\\([\\`*_{}\[\]()#+\-.!>|~])/g, (_, ch) => park(ch));
+
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");     // images -> alt text
+  s = s.replace(/!\[([^\]]*)\]\[[^\]]*\]/g, "$1");
+  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");      // links -> label, URL dropped
+  s = s.replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1");
+  s = s.replace(/\[\^[^\]]*\]/g, "");                 // footnote references
+  s = s.replace(/<https?:\/\/[^>]*>/gi, "");          // autolinks
+  s = s.replace(/<[^@\s>]+@[^\s>]+>/g, "");
+  s = s.replace(/\bhttps?:\/\/\S+/gi, "");            // bare URLs
+  s = s.replace(/<!--[\s\S]*?-->/g, "");
+  s = s.replace(/<\/?[A-Za-z][^>]*>/g, "");           // inline HTML tags
+
+  s = s.replace(/\*\*\*([^*]+)\*\*\*/g, "$1");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  s = s.replace(/\*([^*]+)\*/g, "$1");
+  s = s.replace(/~~([^~]+)~~/g, "$1");
+  // Underscore emphasis only where the markers stand outside a word, so
+  // identifiers such as af_heart survive intact.
+  s = s.replace(/(^|[^A-Za-z0-9_])__([^_]+)__(?![A-Za-z0-9_])/g, "$1$2");
+  s = s.replace(/(^|[^A-Za-z0-9_])_([^_]+)_(?![A-Za-z0-9_])/g, "$1$2");
+
+  s = decodeEntities(s);
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, n) => parked[+n]);
+  if (opts.stripEmoji !== false) s = s.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "");
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// Kokoro's splitter breaks on sentence boundaries, so give every block one.
+function endSentence(s) { return /[.!?]["')\]]?$/.test(s) ? s : s + "."; }
+
+function tokensToSpeech(tokens, opts = {}) {
+  const out = [];
+  for (const t of tokens) {
+    if (t.type === "heading" || t.type === "paragraph") {
+      const s = inlineToSpeech(t.text, opts);
+      if (s) out.push(endSentence(s));
+    } else if (t.type === "code") {
+      const mode = opts.code || "skip";
+      if (mode === "read") { const c = t.text.trim(); if (c) out.push(c); }
+      else if (mode === "announce") out.push(t.lang ? `Code block in ${t.lang} omitted.` : "Code block omitted.");
+    } else if (t.type === "list") {
+      const parts = t.items.map((item, idx) => {
+        const s = inlineToSpeech(item, opts);
+        if (!s) return "";
+        return t.ordered && opts.numberLists ? `${idx + 1}. ${endSentence(s)}` : endSentence(s);
+      }).filter(Boolean);
+      if (parts.length) out.push(parts.join(" "));
+    } else if (t.type === "table") {
+      if ((opts.tables || "flatten") === "skip") continue;
+      const hdr = t.headers.map(h => inlineToSpeech(h, opts));
+      const rows = t.rows.map(r => r
+        .map((c, k) => { const v = inlineToSpeech(c, opts); return v ? (hdr[k] ? `${hdr[k]}: ${v}` : v) : ""; })
+        .filter(Boolean).join(", ")
+      ).filter(Boolean);
+      if (rows.length) out.push(rows.map(endSentence).join(" "));
+    } else if (t.type === "quote") {
+      const s = tokensToSpeech(t.tokens, opts);
+      if (s) out.push(s);
+    }
+  }
+  return out.join("\n\n");
+}
+
+function splitSections(tokens, level) {
+  if (!level) return [{ title: "", level: 0, tokens }];
+  const secs = [];
+  let cur = { title: "", level: 0, tokens: [] };
+  for (const t of tokens) {
+    if (t.type === "heading" && t.level <= level) {
+      if (cur.tokens.length) secs.push(cur);
+      cur = { title: inlineToSpeech(t.text), level: t.level, tokens: [t] };
+    } else {
+      cur.tokens.push(t);
+    }
+  }
+  if (cur.tokens.length) secs.push(cur);
+  return secs.length ? secs : [{ title: "", level: 0, tokens }];
+}
+
+function mdToSpeech(md, opts = {}) {
+  return tokensToSpeech(tokenizeMarkdown(stripFrontMatter(md).body), opts);
+}
+
+function slugify(s, fallback) {
+  const out = (s || "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return out || fallback;
+}
+
+/* ------------------------------------------------------------------ *
+ * Audio encoding
+ * ------------------------------------------------------------------ */
+
+function toPcm16(float32) {
+  const pcm = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return pcm;
+}
+
+function encodeWav(float32, sampleRate = SAMPLE_RATE) {
+  const pcm = toPcm16(float32);
+  const buf = new ArrayBuffer(44 + pcm.length * 2);
+  const view = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  str(0, "RIFF");
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  str(8, "WAVE");
+  str(12, "fmt ");
+  view.setUint32(16, 16, true);              // fmt chunk size
+  view.setUint16(20, 1, true);               // format = PCM
+  view.setUint16(22, 1, true);               // channels = mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);  // byte rate
+  view.setUint16(32, 2, true);               // block align
+  view.setUint16(34, 16, true);              // bits per sample
+  str(36, "data");
+  view.setUint32(40, pcm.length * 2, true);
+  new Int16Array(buf, 44).set(pcm);
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+let lamePromise = null;
+async function encodeMp3(float32, sampleRate = SAMPLE_RATE, kbps = 128) {
+  lamePromise ||= import(LAMEJS_URL);
+  let lame;
+  try {
+    lame = await lamePromise;
+  } catch (e) {
+    lamePromise = null;
+    throw new Error("Could not load the MP3 encoder from the CDN. Choose WAV instead, or retry online. " + e.message);
+  }
+  const Mp3Encoder = lame.Mp3Encoder || lame.default?.Mp3Encoder;
+  if (!Mp3Encoder) throw new Error("lamejs loaded but exposed no Mp3Encoder.");
+
+  const enc = new Mp3Encoder(1, sampleRate, kbps);
+  const pcm = toPcm16(float32);
+  const parts = [];
+  const BLOCK = 1152; // one MPEG frame
+  for (let i = 0; i < pcm.length; i += BLOCK) {
+    const chunk = enc.encodeBuffer(pcm.subarray(i, Math.min(i + BLOCK, pcm.length)));
+    if (chunk.length) parts.push(new Uint8Array(chunk));
+  }
+  const tail = enc.flush();
+  if (tail.length) parts.push(new Uint8Array(tail));
+  return new Blob(parts, { type: "audio/mpeg" });
+}
+
+function concatFloat32(chunks) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const out = new Float32Array(n);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * UI
+ * ------------------------------------------------------------------ */
+
+const $ = id => document.getElementById(id);
+const els = {
+  drop: $("drop"), file: $("file"), md: $("md"), stats: $("stats"),
+  voice: $("voice"), speed: $("speed"), format: $("format"), split: $("split"),
+  device: $("device"), dtype: $("dtype"), code: $("code"), tables: $("tables"),
+  numberLists: $("numberLists"), preview: $("preview"),
+  go: $("go"), cancel: $("cancel"), bar: $("bar"), barWrap: $("barWrap"), log: $("log"),
+  results: $("results"), tracks: $("tracks"), dlAll: $("dlAll"),
+  fileHint: $("fileHint"), fatal: $("fatal"),
+};
+
+// Shown before the model loads; replaced by tts.list_voices() once it has.
+const VOICES = [
+  ["American English", [
+    ["af_heart", "Heart (F)"], ["af_bella", "Bella (F)"], ["af_nicole", "Nicole (F)"],
+    ["af_sarah", "Sarah (F)"], ["af_kore", "Kore (F)"], ["af_aoede", "Aoede (F)"],
+    ["af_nova", "Nova (F)"], ["af_sky", "Sky (F)"],
+    ["am_michael", "Michael (M)"], ["am_puck", "Puck (M)"], ["am_fenrir", "Fenrir (M)"],
+    ["am_adam", "Adam (M)"], ["am_echo", "Echo (M)"], ["am_onyx", "Onyx (M)"],
+  ]],
+  ["British English", [
+    ["bf_emma", "Emma (F)"], ["bf_isabella", "Isabella (F)"], ["bf_alice", "Alice (F)"],
+    ["bf_lily", "Lily (F)"], ["bm_george", "George (M)"], ["bm_fable", "Fable (M)"],
+    ["bm_daniel", "Daniel (M)"], ["bm_lewis", "Lewis (M)"],
+  ]],
+];
+
+function fillVoices(groups, selected = "af_heart") {
+  els.voice.innerHTML = "";
+  for (const [label, list] of groups) {
+    const og = document.createElement("optgroup");
+    og.label = label;
+    for (const [id, name] of list) {
+      const o = document.createElement("option");
+      o.value = id;
+      o.textContent = id === name ? id : `${name} — ${id}`;
+      og.appendChild(o);
+    }
+    els.voice.appendChild(og);
+  }
+  els.voice.value = selected;
+  if (!els.voice.value) els.voice.selectedIndex = 0;
+}
+fillVoices(VOICES);
+
+if (location.protocol === "file:") els.fileHint.classList.remove("hidden");
+
+function log(msg) { els.log.textContent = msg; }
+function progress(frac) {
+  els.barWrap.classList.toggle("hidden", frac == null);
+  if (frac != null) els.bar.style.width = Math.max(0, Math.min(1, frac)) * 100 + "%";
+}
+function fatal(msg) {
+  els.fatal.textContent = msg;
+  els.fatal.classList.remove("hidden");
+}
+
+function currentOpts() {
+  return {
+    code: els.code.value,
+    tables: els.tables.value,
+    numberLists: els.numberLists.checked,
+  };
+}
+
+let docTitle = "audiobook";
+
+function refresh() {
+  const { body, title } = stripFrontMatter(els.md.value);
+  if (title) docTitle = slugify(title, "audiobook");
+  const tokens = tokenizeMarkdown(body);
+  const opts = currentOpts();
+  const text = tokensToSpeech(tokens, opts);
+
+  els.preview.textContent = text || "(nothing to read yet)";
+  if (!text) { els.stats.textContent = ""; return; }
+
+  const words = text.split(/\s+/).filter(Boolean).length;
+  const mins = words / 150 / (+els.speed.value || 1);
+  const parts = splitSections(tokens, +els.split.value)
+    .filter(s => tokensToSpeech(s.tokens, opts).trim()).length;
+  els.stats.textContent =
+    `${words.toLocaleString()} words · ${text.length.toLocaleString()} characters · ` +
+    `${parts} ${parts === 1 ? "part" : "parts"} · roughly ${mins < 1 ? "<1" : Math.round(mins)} min of audio`;
+}
+
+async function loadFile(f) {
+  els.md.value = await f.text();
+  docTitle = slugify(f.name.replace(/\.[^.]+$/, ""), "audiobook");
+  refresh();
+}
+
+els.drop.addEventListener("click", () => els.file.click());
+els.file.addEventListener("change", e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+for (const ev of ["dragenter", "dragover"]) {
+  els.drop.addEventListener(ev, e => { e.preventDefault(); els.drop.classList.add("over"); });
+}
+for (const ev of ["dragleave", "drop"]) {
+  els.drop.addEventListener(ev, e => { e.preventDefault(); els.drop.classList.remove("over"); });
+}
+els.drop.addEventListener("drop", e => { if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.speed]) {
+  el.addEventListener("input", refresh);
+  el.addEventListener("change", refresh);
+}
+
+/* ---- synthesis ---- */
+
+let tts = null;
+let TextSplitterStream = null;
+let cancelled = false;
+const objectUrls = [];
+
+function pickDevice() {
+  if (els.device.value !== "auto") return els.device.value;
+  return navigator.gpu ? "webgpu" : "wasm";
+}
+function pickDtype(device) {
+  if (els.dtype.value !== "auto") return els.dtype.value;
+  // q8 kernels are the well-trodden path on WASM; WebGPU is happiest in fp32.
+  return device === "webgpu" ? "fp32" : "q8";
+}
+
+async function ensureModel(device, dtype) {
+  if (tts) return tts;
+  log(`Loading Kokoro-82M (${device}, ${dtype})… the first run downloads the weights.`);
+
+  let mod;
+  try {
+    mod = await import(KOKORO_URL);
+  } catch (e) {
+    throw new Error(
+      "Could not load kokoro-js from the CDN. The first run needs network access to " +
+      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
+    );
+  }
+  TextSplitterStream = mod.TextSplitterStream;
+
+  const seen = new Map();
+  tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
+    dtype, device,
+    progress_callback: p => {
+      if (!p || !p.file) return;
+      if (p.status === "progress" && p.total) {
+        seen.set(p.file, { loaded: p.loaded, total: p.total });
+        let loaded = 0, total = 0;
+        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
+        progress(loaded / total);
+        log(`Downloading model — ${(loaded / 1048576).toFixed(1)} MB of ${(total / 1048576).toFixed(1)} MB`);
+      }
+    },
+  });
+
+  try {
+    const list = tts.list_voices?.();
+    const ids = Array.isArray(list) ? list : Object.keys(list || {});
+    if (ids.length) fillVoices([["Voices", ids.map(id => [id, id])]], els.voice.value);
+  } catch { /* keep the static list */ }
+
+  progress(null);
+  return tts;
+}
+
+async function synthSection(text, voice, speed, onChunk) {
+  const splitter = new TextSplitterStream();
+  const stream = tts.stream(splitter, { voice, speed });
+  const chunks = [];
+
+  // Start consuming before pushing, so a splitter that applies backpressure
+  // cannot deadlock against a large document.
+  const consume = (async () => {
+    for await (const item of stream) {
+      if (cancelled) break;
+      const data = item.audio?.audio ?? item.audio;
+      if (data?.length) { chunks.push(data); onChunk(data.length); }
+    }
+  })();
+
+  splitter.push(text);
+  splitter.close();
+  await consume;
+  return concatFloat32(chunks);
+}
+
+function fmtTime(s) {
+  const m = Math.floor(s / 60), sec = Math.round(s % 60);
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function addTrack(name, filename, blob, seconds, first = false) {
+  const url = URL.createObjectURL(blob);
+  objectUrls.push(url);
+
+  const div = document.createElement("div");
+  div.className = "track";
+  const top = document.createElement("div");
+  top.className = "top";
+  const b = document.createElement("b");
+  b.textContent = name;
+  const right = document.createElement("small");
+  right.textContent = `${fmtTime(seconds)} · ${(blob.size / 1048576).toFixed(1)} MB  `;
+  const a = document.createElement("a");
+  a.className = "dl";
+  a.href = url;
+  a.download = filename;
+  a.textContent = "Download";
+  right.appendChild(a);
+  top.append(b, right);
+
+  const audio = document.createElement("audio");
+  audio.controls = true;
+  audio.preload = "none";
+  audio.src = url;
+  div.append(top, audio);
+
+  if (first) els.tracks.prepend(div); else els.tracks.appendChild(div);
+  els.results.classList.remove("hidden");
+}
+
+async function generate() {
+  cancelled = false;
+  els.fatal.classList.add("hidden");
+  els.go.disabled = true;
+  els.cancel.classList.remove("hidden");
+  els.results.classList.add("hidden");
+  els.tracks.innerHTML = "";
+  for (const u of objectUrls.splice(0)) URL.revokeObjectURL(u);
+
+  const opts = currentOpts();
+  const { body } = stripFrontMatter(els.md.value);
+  const tokens = tokenizeMarkdown(body);
+  const sections = splitSections(tokens, +els.split.value)
+    .map(s => ({ ...s, text: tokensToSpeech(s.tokens, opts).trim() }))
+    .filter(s => s.text);
+
+  if (!sections.length) {
+    fatal("There is no readable text in that document.");
+    els.go.disabled = false;
+    els.cancel.classList.add("hidden");
+    return;
+  }
+
+  const totalChars = sections.reduce((n, s) => n + s.text.length, 0);
+  const voice = els.voice.value;
+  const speed = +els.speed.value || 1;
+  const fmt = els.format.value;
+  const device = pickDevice();
+
+  try {
+    await ensureModel(device, pickDtype(device));
+
+    const t0 = performance.now();
+    let doneChars = 0, totalSamples = 0;
+    const all = [];
+
+    for (let i = 0; i < sections.length; i++) {
+      if (cancelled) break;
+      const s = sections[i];
+      const label = s.title || (sections.length > 1 ? `Part ${i + 1}` : "Audiobook");
+
+      const audio = await synthSection(s.text, voice, speed, added => {
+        totalSamples += added;
+        const secs = totalSamples / SAMPLE_RATE;
+        const elapsed = (performance.now() - t0) / 1000;
+        // Mid-section the character count is only half-consumed; good enough for a bar.
+        progress((doneChars + s.text.length * 0.5) / totalChars);
+        log(`[${i + 1}/${sections.length}] ${label} — ${fmtTime(secs)} of audio · ` +
+            `${elapsed.toFixed(1)}s elapsed · RTF ${(elapsed / Math.max(secs, 0.001)).toFixed(2)}x`);
+      });
+
+      doneChars += s.text.length;
+      progress(doneChars / totalChars);
+      if (cancelled) break;
+      if (!audio.length) continue;
+
+      all.push(audio);
+      if (sections.length > 1) {
+        const n = String(i + 1).padStart(2, "0");
+        const blob = fmt === "mp3" ? await encodeMp3(audio) : encodeWav(audio);
+        addTrack(label, `${n}-${slugify(label, "part-" + n)}.${fmt}`, blob, audio.length / SAMPLE_RATE);
+      }
+    }
+
+    if (cancelled) { log("Cancelled."); return; }
+    if (!all.length) { fatal("No audio was produced."); return; }
+
+    log("Encoding the complete book…");
+    const full = concatFloat32(all);
+    const blob = fmt === "mp3" ? await encodeMp3(full) : encodeWav(full);
+    addTrack("Complete book", `${docTitle}.${fmt}`, blob, full.length / SAMPLE_RATE, true);
+
+    const elapsed = (performance.now() - t0) / 1000;
+    const secs = full.length / SAMPLE_RATE;
+    log(`Done — ${fmtTime(secs)} of audio in ${elapsed.toFixed(1)}s ` +
+        `(RTF ${(elapsed / secs).toFixed(2)}x, ${(secs / elapsed).toFixed(1)}x faster than real time) on ${device}.`);
+    progress(null);
+  } catch (e) {
+    console.error(e);
+    fatal(e.message || String(e));
+    log("");
+    progress(null);
+  } finally {
+    els.go.disabled = false;
+    els.cancel.classList.add("hidden");
+  }
+}
+
+els.go.addEventListener("click", generate);
+els.cancel.addEventListener("click", () => { cancelled = true; log("Cancelling…"); });
+els.dlAll.addEventListener("click", () => {
+  for (const a of els.tracks.querySelectorAll("a.dl")) a.click();
+});
+
+// Exposed so the text and encoding pipeline can be exercised without the model.
+window.ZAB = {
+  stripFrontMatter, tokenizeMarkdown, inlineToSpeech, tokensToSpeech,
+  splitSections, mdToSpeech, slugify, decodeEntities,
+  encodeWav, encodeMp3, toPcm16, concatFloat32, SAMPLE_RATE,
+};
+
+refresh();
+window.dispatchEvent(new Event("zab-ready"));
+</script>
+</body>
+</html>

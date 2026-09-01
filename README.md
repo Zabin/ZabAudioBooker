@@ -11,6 +11,10 @@ Two ways in:
 - **`zabaudiobooker.html`** — a single page you open in a browser. Markdown in,
   a chaptered audiobook out. No Python, no install; Kokoro runs client-side.
 
+New to Python, or to any of this? **[MANUAL.md](MANUAL.md)** is a step-by-step
+guide that assumes nothing is installed. **[TESTING.md](TESTING.md)** is a
+checklist for trying the browser version and reporting what breaks.
+
 ## Features
 
 - Single-file CLI — text file or stdin in, WAV or MP3 out.

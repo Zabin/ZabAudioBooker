@@ -8,8 +8,9 @@ CPU fallback.
 Two ways in:
 
 - **`zabaudiobooker.py`** — Python CLI. Plain text in, WAV or MP3 out.
-- **`zabaudiobooker.html`** — a single page you open in a browser. Markdown in,
-  a chaptered audiobook out. No Python, no install; Kokoro runs client-side.
+- **`zabaudiobooker.html`** — a single page you open in a browser. Markdown or
+  PDF in, a chaptered audiobook out. No Python, no install; Kokoro runs
+  client-side.
 
 New to Python, or to any of this? **[MANUAL.md](MANUAL.md)** is a step-by-step
 guide that assumes nothing is installed. **[TESTING.md](TESTING.md)** is a
@@ -145,6 +146,42 @@ The first run downloads the model weights from Hugging Face (roughly 90 MB at
 `q8`, up to about 330 MB at `fp32`) and the browser caches them. Everything
 after that is offline. WebGPU is used when the browser exposes it, otherwise it
 falls back to WASM on the CPU.
+
+### PDFs
+
+Drop a `.pdf` on the same box and it is converted to Markdown first, into the
+text area, where you can read and correct it before generating anything. A PDF
+carries no structure, only positioned glyphs, so the conversion is inference and
+it will sometimes be wrong. That is exactly why the Markdown is left in front of
+you rather than sent straight to the voice.
+
+What it strips, none of which you want read aloud:
+
+| Removed | How it is recognised |
+| --- | --- |
+| Running heads and feet | Margin-band lines recurring across a quarter of the pages |
+| Page numbers | Bare numerals in the margin bands, arabic or roman |
+| Footnote markers | Small glyphs riding above the baseline, digits or `* † ‡ § ¶` |
+| Footnote text | Small print sitting below the last full-size line on its page |
+| Index and contents pages | Pages mostly made of "entry, 12, 45" lines or dot leaders |
+
+It also reflows wrapped lines back into paragraphs, rejoins words broken across
+a line by a hyphen, and promotes larger type to headings, which then feed the
+chapter splitter for free.
+
+Limits worth knowing. **Two-column layouts will come out scrambled**, because
+lines are grouped by vertical position and a two-column page interleaves them.
+Tables, equations and figure captions read poorly. A scanned PDF has no text
+layer at all; that is detected and refused with an explanation rather than
+producing silence. For anything pathological, run it through
+[Marker](https://github.com/datalab-to/marker),
+[MinerU](https://github.com/opendatalab/MinerU) or
+[Docling](https://github.com/docling-project/docling), which are far stronger
+converters, and drop the Markdown they give you in here.
+
+Opened from the filesystem, the PDF reader falls back to running on the main
+thread, which is slower and freezes the page while it works. Serving the folder
+avoids that.
 
 ### What it does with Markdown
 

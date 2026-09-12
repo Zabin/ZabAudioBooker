@@ -16,6 +16,7 @@ produce the same quality of audio.
 | Do you need Python? | **No** | Yes |
 | Anything to install? | **Nothing** | Python, PyTorch, and 3 other pieces |
 | Reads Markdown (`.md`) files? | **Yes, properly** | No — it would read the `#` symbols out loud |
+| Reads PDFs? | **Yes** | No |
 | Splits a book into chapters? | **Yes** | No |
 | Time to first audio | About 5 minutes | About 30–60 minutes |
 | Uses your graphics card | Yes, if your browser supports it | Yes, if you have an NVIDIA card |
@@ -54,9 +55,17 @@ There is nothing to install and no account to create.
 
 ### Step 3: Make your first audiobook
 
-1. **Section 1 — Markdown.** Drag a `.md` file onto the dotted box, or click
-   the box to browse for one. You can also type or paste text directly into
-   the large box underneath.
+1. **Section 1 — Markdown.** Drag a `.md` or `.pdf` file onto the dotted box, or
+   click the box to browse for one. You can also type or paste text directly
+   into the large box underneath.
+
+   **Dropping a PDF** converts it to Markdown first and puts the result in the
+   box. Read it before you generate anything. Running heads, page numbers,
+   footnotes and index pages are stripped automatically, but a PDF has no real
+   structure, so the conversion is guesswork and sometimes gets it wrong. The
+   box is editable precisely so you can fix it. Two-column PDFs come out
+   scrambled, and scanned PDFs are refused with an explanation because they
+   contain no text at all.
 
    No Markdown file handy? Paste this in to try it out:
 

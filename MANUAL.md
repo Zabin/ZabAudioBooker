@@ -127,7 +127,7 @@ download multiple files — say yes).
 | **Voice** | Which voice reads the text. The letters mean accent and gender: `af_` = American female, `am_` = American male, `bf_` = British female, `bm_` = British male. |
 | **Speed** | `1` is normal. `1.15` is a common audiobook speed. Below `0.8` or above `1.5` starts to sound unnatural. |
 | **Format** | **MP3** for anything long — an hour is about 60 MB. **WAV** is uncompressed and much bigger (about 170 MB per hour), only worth it if you plan to edit the audio. |
-| **Split into chapters at** | Where to cut the book into separate files. `Heading 2 (##)` suits most documents. Choose *Don't split* for one single file. |
+| **Split into chapters at** | Where to cut the book into separate files. `Heading 2 (##)` suits most documents. Choose *Don't split* for one single file. A heading with almost nothing after it — a title page, a bare section divider — is folded into the next real chapter automatically, so you don't end up with a pile of one- or two-second files. |
 | **Device** | Leave on **Auto**. It uses your graphics card if your browser offers one, otherwise the processor. |
 | **Precision** | Leave on **Auto**. Lower precision (`q8`) means a smaller download and faster running; higher (`fp32`) means slightly better audio. |
 | **Code blocks** | What to do with code in the document. **Skip silently** is the default. |

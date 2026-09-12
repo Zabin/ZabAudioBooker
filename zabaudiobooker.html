@@ -520,6 +520,56 @@ function splitSections(tokens, level) {
   return secs.length ? secs : [{ title: "", level: 0, tokens }];
 }
 
+const MIN_SECTION_WORDS = 20; // ~8s of audio at 1x speed, 150wpm. A PDF title
+// page can set the title, subtitle and byline in different sizes, each of
+// which comes out as its own one-to-six-word heading; this leaves 3x+ margin
+// above anything a real heading-only fragment has produced, while any
+// genuine one-paragraph section clears it easily.
+
+function wordCount(text) {
+  return text.trim() ? text.trim().split(/\s+/).length : 0;
+}
+
+// A heading is spoken exactly like a paragraph, so a section holding nothing
+// but a short heading still produces non-empty text and would otherwise get
+// its own file. Fold anything under the threshold into a real neighbor
+// instead: forward into whatever comes next, cascading through a whole run
+// of short sections, or backward onto the last kept section if the short run
+// reaches the end of the document with nothing after it.
+function mergeShortSections(sections, minWords = MIN_SECTION_WORDS) {
+  if (sections.length <= 1) return sections;
+  const out = [];
+  let pending = null; // a short run still looking for a section to land in
+
+  for (const s of sections) {
+    const merged = pending
+      ? { ...s, text: pending.text + "\n\n" + s.text, tokens: pending.tokens.concat(s.tokens) }
+      : s;
+    if (wordCount(merged.text) < minWords) pending = merged;
+    else { out.push(merged); pending = null; }
+  }
+  if (pending) {
+    if (out.length) {
+      const last = out[out.length - 1];
+      out[out.length - 1] = {
+        ...last,
+        text: last.text + "\n\n" + pending.text,
+        tokens: last.tokens.concat(pending.tokens),
+      };
+    } else out.push(pending); // the whole document is short; nothing to fold into
+  }
+  return out;
+}
+
+// The one place both the live preview and generation turn tokens into the
+// sections that will actually become files, so they can never disagree.
+function sectionsWithText(tokens, level, opts) {
+  const sections = splitSections(tokens, level)
+    .map(s => ({ ...s, text: tokensToSpeech(s.tokens, opts).trim() }))
+    .filter(s => s.text);
+  return mergeShortSections(sections);
+}
+
 function mdToSpeech(md, opts = {}) {
   return tokensToSpeech(tokenizeMarkdown(stripFrontMatter(md).body), opts);
 }
@@ -1049,10 +1099,9 @@ function refresh() {
   els.preview.textContent = text || "(nothing to read yet)";
   if (!text) { els.stats.textContent = ""; return; }
 
-  const words = text.split(/\s+/).filter(Boolean).length;
+  const words = wordCount(text);
   const mins = words / 150 / (+els.speed.value || 1);
-  const parts = splitSections(tokens, +els.split.value)
-    .filter(s => tokensToSpeech(s.tokens, opts).trim()).length;
+  const parts = sectionsWithText(tokens, +els.split.value, opts).length;
   els.stats.textContent =
     `${words.toLocaleString()} words · ${text.length.toLocaleString()} characters · ` +
     `${parts} ${parts === 1 ? "part" : "parts"} · roughly ${mins < 1 ? "<1" : Math.round(mins)} min of audio`;
@@ -1242,9 +1291,7 @@ async function generate() {
   const opts = currentOpts();
   const { body } = stripFrontMatter(els.md.value);
   const tokens = tokenizeMarkdown(body);
-  const sections = splitSections(tokens, +els.split.value)
-    .map(s => ({ ...s, text: tokensToSpeech(s.tokens, opts).trim() }))
-    .filter(s => s.text);
+  const sections = sectionsWithText(tokens, +els.split.value, opts);
 
   if (!sections.length) {
     fatal("There is no readable text in that document.");
@@ -1328,6 +1375,7 @@ els.dlAll.addEventListener("click", () => {
 window.ZAB = {
   stripFrontMatter, tokenizeMarkdown, inlineToSpeech, tokensToSpeech,
   splitSections, mdToSpeech, slugify, decodeEntities, capLongRuns, MAX_RUN,
+  MIN_SECTION_WORDS, wordCount, mergeShortSections, sectionsWithText,
   pdfPagesToMarkdown, pdfExtractPages, pdfToMarkdown, looksScanned,
   bodySize, groupLines, lineText, normalizeGlyphs,
   itemGeometry, isUpright, repairLigatures, ligaturePlan, applyLigatures,

@@ -166,6 +166,16 @@ What it strips, none of which you want read aloud:
 | Footnote text | Small print sitting below the last full-size line on its page |
 | Index and contents pages | Pages mostly made of "entry, 12, 45" lines or dot leaders |
 
+A title page that sets the title, subtitle and byline in different sizes can
+still come out as several short headings rather than one clean block — that's
+the two-column limitation above. Rather than shipping each as its own
+few-second file, any section under about 20 words is folded into the next
+substantial one, or the previous one if it's the last thing in the document.
+Nothing is dropped; a title page just becomes a short preamble spoken before
+chapter one instead of five separate tracks. The same rule applies to
+ordinary Markdown — two headings with nothing meaningful between them merge
+the same way.
+
 It also reflows wrapped lines back into paragraphs, rejoins words broken across
 a line by a hyphen, and promotes larger type to headings, which then feed the
 chapter splitter for free.

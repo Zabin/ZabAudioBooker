@@ -1,6 +1,0 @@
-kokoro>=0.9.4
-soundfile>=0.12.1
-numpy>=1.24
-torch>=2.1
-# Optional: MP3 export. If pydub is installed, ffmpeg must be on PATH.
-pydub>=0.25.1

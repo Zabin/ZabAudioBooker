@@ -1,17 +1,11 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-env/
-
-# Generated audio / models
+# Generated audio
 *.wav
 *.mp3
 *.m4b
-models/
-.cache/
 
 # IDE
 .idea/
 .vscode/
+
+# OS
+.DS_Store

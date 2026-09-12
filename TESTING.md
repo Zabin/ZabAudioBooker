@@ -1,6 +1,6 @@
 # Testing ZabAudioBooker & sending feedback
 
-This is a checklist for putting the new browser version through its paces, and
+This is a checklist for putting ZabAudioBooker through its paces, and
 a template for reporting what you find.
 
 Everything here refers to `zabaudiobooker.html`. See
@@ -128,12 +128,6 @@ invented, so this is where they meet reality.
 Tell me the ratio that matters: roughly how much of the converted text needed
 hand-fixing before it was worth listening to. That number decides whether the
 heuristics are good enough or need another pass.
-
-### 8. If you use the command-line version
-
-- [ ] The install in [MANUAL.md Part 2](MANUAL.md#part-2--the-command-line-version-this-one-needs-python)
-      works as written. Tell me any step where the manual and reality diverge —
-      that manual has not been walked through by a beginner yet either.
 
 ---
 

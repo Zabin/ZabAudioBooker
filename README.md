@@ -159,7 +159,8 @@ What it strips, none of which you want read aloud:
 
 | Removed | How it is recognised |
 | --- | --- |
-| Running heads and feet | Margin-band lines recurring across a quarter of the pages |
+| Running heads and feet | First or last line on a page, detached from the text block, recurring across a quarter of the pages |
+| Download stamps | Rotated text, which in a book is never content |
 | Page numbers | Bare numerals in the margin bands, arabic or roman |
 | Footnote markers | Small glyphs riding above the baseline, digits or `* † ‡ § ¶` |
 | Footnote text | Small print sitting below the last full-size line on its page |
@@ -168,6 +169,11 @@ What it strips, none of which you want read aloud:
 It also reflows wrapped lines back into paragraphs, rejoins words broken across
 a line by a hyphen, and promotes larger type to headings, which then feed the
 chapter splitter for free.
+
+Some older typesetting maps ligature glyphs onto `ª` and `º`, so "financial"
+arrives as "ªnancial" and a voice reads gibberish. That is repaired, but only
+on the document's own evidence: the glyph has to be used inside words and never
+sit against a digit, so a Spanish or Portuguese ordinal like `1ª` is untouched.
 
 Limits worth knowing. **Two-column layouts will come out scrambled**, because
 lines are grouped by vertical position and a two-column page interleaves them.

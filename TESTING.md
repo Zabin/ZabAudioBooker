@@ -119,6 +119,8 @@ invented, so this is where they meet reality.
 - [ ] Words broken across a line rejoined, no "exam ple".
 - [ ] Paragraphs are paragraphs, not one wall of text and not one line each.
 - [ ] A scanned PDF gives the OCR message, not empty output or silence.
+- [ ] No "Downloaded from ... by guest on ..." stamp anywhere in the text.
+- [ ] No mangled words from ligature glyphs, such as "ªnancial" for financial.
 
 Tell me the ratio that matters: roughly how much of the converted text needed
 hand-fixing before it was worth listening to. That number decides whether the

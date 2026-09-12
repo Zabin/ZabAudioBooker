@@ -1,0 +1,1543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZabAudioBooker — Markdown to Audiobook</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4;
+    --panel: #ffffff;
+    --ink: #16161a;
+    --muted: #5f6470;
+    --line: #e0e0dc;
+    --accent: #2f6f4f;
+    --accent-ink: #ffffff;
+    --warn-bg: #fff6e0;
+    --warn-line: #e8cf94;
+    --err-bg: #fdeaea;
+    --err-line: #e5b2b2;
+    --err-ink: #8c2b2b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a;
+      --panel: #1e2024;
+      --ink: #e8e8e6;
+      --muted: #9aa0ab;
+      --line: #32353b;
+      --accent: #57a97b;
+      --accent-ink: #0f1512;
+      --warn-bg: #2f2a1c;
+      --warn-line: #5c5233;
+      --err-bg: #33201f;
+      --err-line: #6b3a38;
+      --err-ink: #ef9a9a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 80px; }
+  header h1 { margin: 0 0 4px; font-size: 25px; letter-spacing: -0.02em; }
+  header p { margin: 0; color: var(--muted); }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    margin-top: 18px;
+  }
+  h2 {
+    margin: 0 0 14px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--muted);
+  }
+  .drop {
+    border: 2px dashed var(--line);
+    border-radius: 8px;
+    padding: 26px 16px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .drop strong { color: var(--ink); }
+  textarea {
+    width: 100%;
+    min-height: 130px;
+    margin-top: 12px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 12.5px/1.5 var(--mono);
+    resize: vertical;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px 16px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  select, input[type=number] {
+    width: 100%;
+    padding: 7px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--ink);
+    font: inherit;
+    font-size: 14px;
+  }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 22px; font-size: 14px; }
+  .check input { margin: 0; }
+  button {
+    font: inherit;
+    font-weight: 600;
+    padding: 10px 18px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .bar { height: 7px; background: var(--line); border-radius: 4px; overflow: hidden; margin: 10px 0 6px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .log { font: 12px/1.6 var(--mono); color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  .note {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-line);
+    border-radius: 8px;
+    padding: 11px 13px;
+    margin-top: 18px;
+    font-size: 13.5px;
+  }
+  .err { background: var(--err-bg); border-color: var(--err-line); color: var(--err-ink); }
+  .note code { font: 12px var(--mono); background: rgba(128,128,128,.16); padding: 1px 5px; border-radius: 4px; }
+  .stats { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  pre.preview {
+    margin: 10px 0 0;
+    padding: 12px;
+    max-height: 300px;
+    overflow: auto;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font: 12.5px/1.6 var(--mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .track { border-top: 1px solid var(--line); padding: 12px 0; }
+  .track:first-of-type { border-top: 0; }
+  .track .top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .track b { font-weight: 600; }
+  .track small { color: var(--muted); white-space: nowrap; }
+  .track audio { width: 100%; margin-top: 8px; height: 34px; }
+  a.dl { font-size: 13px; color: var(--accent); text-decoration: none; font-weight: 600; }
+  a.dl:hover { text-decoration: underline; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ZabAudioBooker</h1>
+    <p>Turn a Markdown file into an audiobook. Kokoro-82M runs entirely in your browser — nothing is uploaded.</p>
+  </header>
+
+  <div id="fileHint" class="note hidden">
+    You opened this page straight from your filesystem. That works in Chrome and Edge, model caching
+    included. If your browser blocks the model download from here, serve the folder instead:
+    <code>python3 -m http.server 8000</code>, then open
+    <code>http://localhost:8000/zabaudiobooker.html</code>.
+  </div>
+
+  <div id="fatal" class="note err hidden"></div>
+
+  <section>
+    <h2>1 · Markdown</h2>
+    <div class="drop" id="drop">
+      <strong>Drop a .md or .pdf file here</strong> or click to choose one — you can also paste below.
+    </div>
+    <input type="file" id="file" accept=".md,.markdown,.mdown,.mkd,.txt,.pdf,text/markdown,text/plain,application/pdf" class="hidden">
+    <textarea id="md" placeholder="# Chapter One&#10;&#10;Or paste your Markdown straight in here."></textarea>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <section>
+    <h2>2 · Voice &amp; output</h2>
+    <div class="grid">
+      <div>
+        <label for="voice">Voice</label>
+        <select id="voice"></select>
+      </div>
+      <div>
+        <label for="speed">Speed</label>
+        <input type="number" id="speed" value="1" min="0.5" max="2" step="0.05">
+      </div>
+      <div>
+        <label for="format">Format</label>
+        <select id="format">
+          <option value="mp3">MP3 — 128 kbps</option>
+          <option value="wav">WAV — 24 kHz PCM</option>
+        </select>
+      </div>
+      <div>
+        <label for="split">Split into chapters at</label>
+        <select id="split">
+          <option value="1">Heading 1 (#)</option>
+          <option value="2" selected>Heading 2 (##)</option>
+          <option value="0">Don't split</option>
+        </select>
+      </div>
+      <div>
+        <label for="device">Device</label>
+        <select id="device">
+          <option value="auto" selected>Auto</option>
+          <option value="webgpu">WebGPU</option>
+          <option value="wasm">WASM (CPU)</option>
+        </select>
+      </div>
+      <div>
+        <label for="dtype">Precision</label>
+        <select id="dtype">
+          <option value="auto" selected>Auto</option>
+          <option value="fp32">fp32 — largest, best</option>
+          <option value="fp16">fp16</option>
+          <option value="q8">q8 — smallest download</option>
+          <option value="q4">q4</option>
+          <option value="q4f16">q4f16</option>
+        </select>
+      </div>
+      <div>
+        <label for="code">Code blocks</label>
+        <select id="code">
+          <option value="skip" selected>Skip silently</option>
+          <option value="announce">Say "code block omitted"</option>
+          <option value="read">Read aloud</option>
+        </select>
+      </div>
+      <div>
+        <label for="tables">Tables</label>
+        <select id="tables">
+          <option value="flatten" selected>Read as "header: value"</option>
+          <option value="skip">Skip</option>
+        </select>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="numberLists" checked>
+        <label for="numberLists" style="margin:0">Number ordered lists aloud</label>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3 · Generate</h2>
+    <details id="previewBox">
+      <summary>Preview the text that will be spoken</summary>
+      <pre class="preview" id="preview"></pre>
+    </details>
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="go">Generate audiobook</button>
+      <button id="cancel" class="hidden">Cancel</button>
+    </div>
+    <div class="bar hidden" id="barWrap"><i id="bar"></i></div>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section id="results" class="hidden">
+    <h2>4 · Result</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button id="dlAll">Download every file</button>
+      <button id="dlZip">Download all as .zip</button>
+    </div>
+    <div id="tracks"></div>
+  </section>
+</div>
+
+<script type="module">
+const SAMPLE_RATE = 24000;
+const MODEL_ID    = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const KOKORO_URL  = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm";
+const LAMEJS_URL  = "https://cdn.jsdelivr.net/npm/@breezystack/lamejs@1.2.7/+esm";
+
+/* ------------------------------------------------------------------ *
+ * Markdown -> speech text.
+ *
+ * Deliberately hand-rolled and dependency-free: this half of the app has
+ * to work (and be testable) without touching the network, and the goal is
+ * speakable prose rather than faithful CommonMark rendering. Rendering to
+ * HTML and taking textContent would read code blocks and URLs out loud.
+ * ------------------------------------------------------------------ */
+
+const RE_FENCE     = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
+const RE_ATX       = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+const RE_HR        = /^\s{0,3}(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/;
+const RE_QUOTE     = /^\s{0,3}>\s?/;
+const RE_ULI       = /^(\s*)[-*+]\s+(.*)$/;
+const RE_OLI       = /^(\s*)\d{1,9}[.)]\s+(.*)$/;
+const RE_TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$/;
+const RE_SETEXT_H1 = /^\s{0,3}=+\s*$/;
+const RE_SETEXT_H2 = /^\s{0,3}-+\s*$/;
+
+const ENTITIES = {
+  "&nbsp;": " ", "&mdash;": "—", "&ndash;": "–", "&hellip;": "…",
+  "&ldquo;": "“", "&rdquo;": "”", "&lsquo;": "‘", "&rsquo;": "’",
+  "&quot;": '"', "&apos;": "'", "&lt;": "<", "&gt;": ">",
+  "&copy;": "©", "&reg;": "®", "&trade;": "™",
+  "&deg;": "°", "&times;": "×",
+};
+
+function decodeEntities(s) {
+  for (const [k, v] of Object.entries(ENTITIES)) s = s.split(k).join(v);
+  s = s.replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d));
+  s = s.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)));
+  return s.split("&amp;").join("&"); // last, so "&amp;lt;" decodes to "&lt;" not "<"
+}
+
+function stripFrontMatter(md) {
+  const m = md.match(/^\uFEFF?(---|\+\+\+)[ \t]*\r?\n([\s\S]*?)\r?\n\1[ \t]*(?:\r?\n|$)/);
+  if (!m) return { body: md.replace(/^\uFEFF/, ""), title: "" };
+  const title = (m[2].match(/^title\s*:\s*(.+)$/mi) || [, ""])[1].trim().replace(/^["']|["']$/g, "");
+  return { body: md.slice(m[0].length), title };
+}
+
+function splitRow(line) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+}
+
+function isBlockStart(line) {
+  return RE_FENCE.test(line) || RE_ATX.test(line) || RE_HR.test(line) ||
+         RE_QUOTE.test(line) || RE_ULI.test(line) || RE_OLI.test(line);
+}
+
+function tokenizeMarkdown(md) {
+  const lines = md.replace(/\r\n?/g, "\n").split("\n");
+  const tokens = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+
+    let m = line.match(RE_FENCE);
+    if (m) {
+      const close = new RegExp("^\\s{0,3}" + m[1][0] + "{" + m[1].length + ",}\\s*$");
+      const lang = m[2].trim().split(/\s+/)[0];
+      const body = [];
+      i++;
+      while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
+      i++; // consume the closing fence; harmless if the file ended unterminated
+      tokens.push({ type: "code", lang, text: body.join("\n") });
+      continue;
+    }
+
+    m = line.match(RE_ATX);
+    if (m) { tokens.push({ type: "heading", level: m[1].length, text: m[2] }); i++; continue; }
+
+    if (RE_HR.test(line)) { tokens.push({ type: "hr" }); i++; continue; }
+
+    // Footnote definitions: the reference is stripped inline, so reading the
+    // definition where it happens to sit would be an orphaned aside.
+    if (/^\s{0,3}\[\^[^\]]*\]:/.test(line)) {
+      i++;
+      while (i < lines.length && lines[i].trim() && /^\s+\S/.test(lines[i])) i++;
+      continue;
+    }
+
+    if (RE_QUOTE.test(line)) {
+      const buf = [];
+      while (i < lines.length && lines[i].trim() && (RE_QUOTE.test(lines[i]) || !isBlockStart(lines[i]))) {
+        buf.push(lines[i].replace(RE_QUOTE, ""));
+        i++;
+      }
+      tokens.push({ type: "quote", tokens: tokenizeMarkdown(buf.join("\n")) });
+      continue;
+    }
+
+    if (line.includes("|") && i + 1 < lines.length && RE_TABLE_SEP.test(lines[i + 1])) {
+      const headers = splitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) rows.push(splitRow(lines[i++]));
+      tokens.push({ type: "table", headers, rows });
+      continue;
+    }
+
+    if (RE_ULI.test(line) || RE_OLI.test(line)) {
+      const ordered = RE_OLI.test(line);
+      const RE_ITEM = ordered ? RE_OLI : RE_ULI;   // a list ends where its marker style changes
+      const items = [];
+      while (i < lines.length) {
+        const im = lines[i].match(RE_ITEM);
+        if (im) {
+          items.push(im[2]);
+          i++;
+          // lazy continuation: indented text that starts no new item or block
+          while (i < lines.length && lines[i].trim() && /^\s+\S/.test(lines[i]) && !isBlockStart(lines[i])) {
+            items[items.length - 1] += " " + lines[i].trim();
+            i++;
+          }
+        } else if (!lines[i].trim() && RE_ITEM.test(lines[i + 1] || "")) {
+          i++; // blank line inside a loose list
+        } else break;
+      }
+      tokens.push({ type: "list", ordered, items });
+      continue;
+    }
+
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) buf.push(lines[i++]);
+    if (buf.length && i < lines.length) {
+      if (RE_SETEXT_H1.test(lines[i])) { tokens.push({ type: "heading", level: 1, text: buf.join(" ") }); i++; continue; }
+      if (RE_SETEXT_H2.test(lines[i])) { tokens.push({ type: "heading", level: 2, text: buf.join(" ") }); i++; continue; }
+    }
+    if (buf.length) tokens.push({ type: "paragraph", text: buf.join(" ") });
+    else i++;
+  }
+  return tokens;
+}
+
+function inlineToSpeech(s, opts = {}) {
+  if (!s) return "";
+
+  const parked = [];
+  const park = v => "\u0000" + (parked.push(v) - 1) + "\u0000";
+  // Park code spans so emphasis and URL stripping cannot chew up their contents,
+  // and backslash escapes so that \* is never read as emphasis.
+  s = s.replace(/(`+)([^`]|[^`][\s\S]*?)\1/g, (_, __, code) => park(code.trim()));
+  s = s.replace(/\\([\\`*_{}\[\]()#+\-.!>|~])/g, (_, ch) => park(ch));
+
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");     // images -> alt text
+  s = s.replace(/!\[([^\]]*)\]\[[^\]]*\]/g, "$1");
+  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");      // links -> label, URL dropped
+  s = s.replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1");
+  s = s.replace(/\[\^[^\]]*\]/g, "");                 // footnote references
+  s = s.replace(/<https?:\/\/[^>]*>/gi, "");          // autolinks
+  s = s.replace(/<[^@\s>]+@[^\s>]+>/g, "");
+  s = s.replace(/\bhttps?:\/\/\S+/gi, "");            // bare URLs
+  s = s.replace(/<!--[\s\S]*?-->/g, "");
+  s = s.replace(/<\/?[A-Za-z][^>]*>/g, "");           // inline HTML tags
+
+  s = s.replace(/\*\*\*([^*]+)\*\*\*/g, "$1");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  s = s.replace(/\*([^*]+)\*/g, "$1");
+  s = s.replace(/~~([^~]+)~~/g, "$1");
+  // Underscore emphasis only where the markers stand outside a word, so
+  // identifiers such as af_heart survive intact.
+  s = s.replace(/(^|[^A-Za-z0-9_])__([^_]+)__(?![A-Za-z0-9_])/g, "$1$2");
+  s = s.replace(/(^|[^A-Za-z0-9_])_([^_]+)_(?![A-Za-z0-9_])/g, "$1$2");
+
+  s = decodeEntities(s);
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, n) => parked[+n]);
+  if (opts.stripEmoji !== false) s = s.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "");
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// Kokoro's splitter breaks on sentence boundaries, so give every block one.
+function endSentence(s) { return /[.!?]["')\]]?$/.test(s) ? s : s + "."; }
+
+// Kokoro's context is 510 phoneme tokens, and TextSplitterStream only breaks on
+// sentence boundaries. A run carrying no terminal punctuation therefore reaches
+// the model whole and gets truncated: code read aloud has none at all, and a
+// long comma-spliced sentence has none either. Cap such runs on a word boundary
+// so they arrive as several sentences instead of one over-long one. Applied
+// when feeding the model, not in the preview, which shows the readable text.
+const MAX_RUN = 300; // characters; conservative, since symbols phonemize long
+
+function capLongRuns(text, max = MAX_RUN) {
+  const out = [];
+  for (const unit of text.match(/[^.!?]+[.!?]*\s*/g) || [text]) {
+    let rest = unit.trim();
+    if (!rest) continue;
+    while (rest.length > max) {
+      let cut = rest.lastIndexOf(" ", max);
+      if (cut <= 0) cut = max;          // a single unbroken token: cut it anyway
+      out.push(endSentence(rest.slice(0, cut).trim()));
+      rest = rest.slice(cut).trim();
+    }
+    if (rest) out.push(rest);
+  }
+  return out.join(" ");
+}
+
+function tokensToSpeech(tokens, opts = {}) {
+  const out = [];
+  for (const t of tokens) {
+    if (t.type === "heading" || t.type === "paragraph") {
+      const s = inlineToSpeech(t.text, opts);
+      if (s) out.push(endSentence(s));
+    } else if (t.type === "code") {
+      const mode = opts.code || "skip";
+      if (mode === "read") { const c = t.text.trim(); if (c) out.push(c); }
+      else if (mode === "announce") out.push(t.lang ? `Code block in ${t.lang} omitted.` : "Code block omitted.");
+    } else if (t.type === "list") {
+      const parts = t.items.map((item, idx) => {
+        const s = inlineToSpeech(item, opts);
+        if (!s) return "";
+        return t.ordered && opts.numberLists ? `${idx + 1}. ${endSentence(s)}` : endSentence(s);
+      }).filter(Boolean);
+      if (parts.length) out.push(parts.join(" "));
+    } else if (t.type === "table") {
+      if ((opts.tables || "flatten") === "skip") continue;
+      const hdr = t.headers.map(h => inlineToSpeech(h, opts));
+      const rows = t.rows.map(r => r
+        .map((c, k) => { const v = inlineToSpeech(c, opts); return v ? (hdr[k] ? `${hdr[k]}: ${v}` : v) : ""; })
+        .filter(Boolean).join(", ")
+      ).filter(Boolean);
+      if (rows.length) out.push(rows.map(endSentence).join(" "));
+    } else if (t.type === "quote") {
+      const s = tokensToSpeech(t.tokens, opts);
+      if (s) out.push(s);
+    }
+  }
+  return out.join("\n\n");
+}
+
+function splitSections(tokens, level) {
+  if (!level) return [{ title: "", level: 0, tokens }];
+  const secs = [];
+  let cur = { title: "", level: 0, tokens: [] };
+  for (const t of tokens) {
+    if (t.type === "heading" && t.level <= level) {
+      if (cur.tokens.length) secs.push(cur);
+      cur = { title: inlineToSpeech(t.text), level: t.level, tokens: [t] };
+    } else {
+      cur.tokens.push(t);
+    }
+  }
+  if (cur.tokens.length) secs.push(cur);
+  return secs.length ? secs : [{ title: "", level: 0, tokens }];
+}
+
+const MIN_SECTION_WORDS = 20; // ~8s of audio at 1x speed, 150wpm. A PDF title
+// page can set the title, subtitle and byline in different sizes, each of
+// which comes out as its own one-to-six-word heading; this leaves 3x+ margin
+// above anything a real heading-only fragment has produced, while any
+// genuine one-paragraph section clears it easily.
+
+function wordCount(text) {
+  return text.trim() ? text.trim().split(/\s+/).length : 0;
+}
+
+// A heading is spoken exactly like a paragraph, so a section holding nothing
+// but a short heading still produces non-empty text and would otherwise get
+// its own file. Fold anything under the threshold into a real neighbor
+// instead: forward into whatever comes next, cascading through a whole run
+// of short sections, or backward onto the last kept section if the short run
+// reaches the end of the document with nothing after it.
+function mergeShortSections(sections, minWords = MIN_SECTION_WORDS) {
+  if (sections.length <= 1) return sections;
+  const out = [];
+  let pending = null; // a short run still looking for a section to land in
+
+  for (const s of sections) {
+    const merged = pending
+      ? { ...s, text: pending.text + "\n\n" + s.text, tokens: pending.tokens.concat(s.tokens) }
+      : s;
+    if (wordCount(merged.text) < minWords) pending = merged;
+    else { out.push(merged); pending = null; }
+  }
+  if (pending) {
+    if (out.length) {
+      const last = out[out.length - 1];
+      out[out.length - 1] = {
+        ...last,
+        text: last.text + "\n\n" + pending.text,
+        tokens: last.tokens.concat(pending.tokens),
+      };
+    } else out.push(pending); // the whole document is short; nothing to fold into
+  }
+  return out;
+}
+
+// The one place both the live preview and generation turn tokens into the
+// sections that will actually become files, so they can never disagree.
+function sectionsWithText(tokens, level, opts) {
+  const sections = splitSections(tokens, level)
+    .map(s => ({ ...s, text: tokensToSpeech(s.tokens, opts).trim() }))
+    .filter(s => s.text);
+  return mergeShortSections(sections);
+}
+
+function mdToSpeech(md, opts = {}) {
+  return tokensToSpeech(tokenizeMarkdown(stripFrontMatter(md).body), opts);
+}
+
+function slugify(s, fallback) {
+  const out = (s || "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return out || fallback;
+}
+
+/* ------------------------------------------------------------------ *
+ * PDF -> Markdown.
+ *
+ * A PDF has no structure, only positioned glyphs, so everything here is
+ * inference from geometry and font size. The output goes into the Markdown
+ * box rather than straight to audio: extraction is never right first time,
+ * and that box is where you fix it.
+ *
+ * Split in two on purpose. pdfExtractPages is the only part that touches
+ * pdfjs; pdfPagesToMarkdown is pure and carries all the judgement, so it can
+ * be tested with synthetic pages and no network.
+ * ------------------------------------------------------------------ */
+
+const PDFJS_VERSION = "6.3.289";
+const PDFJS_BASE = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/`;
+
+const LIGATURES = { "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st" };
+
+function normalizeGlyphs(s) {
+  return s
+    .replace(/[ﬀ-ﬆ]/g, c => LIGATURES[c] || c)
+    .replace(/­/g, "")                 // soft hyphen
+    .replace(/[   ]/g, " ")  // non-breaking spaces
+    .replace(/[‐‑]/g, "-");       // non-breaking hyphens
+}
+
+// Marker glyphs that sit superscript next to a footnote reference.
+const NOTE_MARK = /^[\d*†‡§¶]+$/;
+
+// Font size is the length of the matrix's y axis, which is what pdf.js uses in
+// its own text layer. Reading transform[3] alone returns 0 for anything
+// rotated, so a stamp set down the margin came through sized 0 and was judged
+// against every threshold wrongly.
+function itemGeometry(t) {
+  return { size: Math.hypot(t[2], t[3]), rot: Math.atan2(t[1], t[0]) };
+}
+
+const UPRIGHT_TOLERANCE = 5 * Math.PI / 180;
+
+function isUpright(it) {
+  return !it.rot || Math.abs(it.rot) <= UPRIGHT_TOLERANCE;
+}
+
+// Some typesetting maps ligature glyphs onto these, so "financial" arrives as
+// "ªnancial" and a speech engine reads gibberish.
+const BROKEN_LIGATURES = { "ª": "fi", "º": "fl" };
+
+// Repair only on the document's own evidence. A blanket substitution would
+// wreck a Spanish or Portuguese ordinal, so require that the glyph is used
+// inside words and never sits after a digit, which is where 1ª would put it.
+// Decided over the whole document, applied per line. The decision needs every
+// page's text; the application has to happen before lines are joined, or a
+// word broken as "inef-" + "ªciencies" never rejoins, because the second half
+// does not start with a letter until after the repair.
+function ligaturePlan(text) {
+  const plan = [];
+  for (const [ch, rep] of Object.entries(BROKEN_LIGATURES)) {
+    const inWord = (text.match(new RegExp(`[A-Za-z]${ch}|${ch}[A-Za-z]`, "g")) || []).length;
+    // No space allowed: an ordinal is written tight against its digit (1ª).
+    // Allowing one let ordinary prose like "in 1999 ªnancial" veto the repair.
+    const afterDigit = (text.match(new RegExp(`[0-9]${ch}`, "g")) || []).length;
+    if (inWord >= 3 && afterDigit === 0) plan.push([ch, rep]);
+  }
+  return plan;
+}
+
+function applyLigatures(text, plan) {
+  let out = text;
+  for (const [ch, rep] of plan) {
+    out = out.replace(new RegExp(`([A-Za-z])${ch}|${ch}([A-Za-z])`, "g"),
+                      (_, a, b) => (a || "") + rep + (b || ""));
+  }
+  return out;
+}
+
+function repairLigatures(text) { return applyLigatures(text, ligaturePlan(text)); }
+
+function median(nums) {
+  if (!nums.length) return 0;
+  const a = [...nums].sort((x, y) => x - y);
+  const m = a.length >> 1;
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+// The reference size everything else is judged against. Weighted by character
+// count so a few huge display words cannot outvote the body text.
+function weightedMedian(hist) {
+  const keys = [...hist.keys()].sort((a, b) => a - b);
+  const total = [...hist.values()].reduce((a, b) => a + b, 0);
+  let seen = 0;
+  for (const k of keys) { seen += hist.get(k); if (seen >= total / 2) return k; }
+  return keys[keys.length - 1] || 0;
+}
+
+function bodySize(pages) {
+  const hist = new Map();
+  for (const pg of pages) {
+    for (const it of pg.items) {
+      const n = it.str.trim().length;
+      if (!n) continue;
+      const k = Math.round(it.size * 2) / 2;
+      hist.set(k, (hist.get(k) || 0) + n);
+    }
+  }
+  return weightedMedian(hist) || 12;
+}
+
+// Items carrying no glyphs tell us nothing and break the geometry. Rotated
+// text is dropped with them: in a book or article the body runs horizontally,
+// and what does not is furniture, most often a download stamp set down the
+// margin. Items with no rot recorded count as upright.
+function usableItems(items) {
+  return items.filter(it => it.str && it.str.trim() !== "" && isUpright(it));
+}
+
+// Group a page's items into visual lines. Items arrive in paint order, not
+// reading order (Chrome emits running heads last), so sort rather than trust it.
+function groupLines(items, body) {
+  const tol = Math.max(2, body * 0.4);
+  const rows = [];
+  for (const it of [...items].sort((a, b) => b.y - a.y || a.x - b.x)) {
+    const row = rows.find(r => Math.abs(r.y - it.y) <= tol);
+    if (row) row.items.push(it);
+    else rows.push({ y: it.y, items: [it] });
+  }
+  for (const r of rows) {
+    r.items.sort((a, b) => a.x - b.x);
+    // Weight by characters so a lone superscript digit cannot define the line.
+    const hist = new Map();
+    for (const it of r.items) {
+      const n = it.str.trim().length;
+      if (n) hist.set(it.size, (hist.get(it.size) || 0) + n);
+    }
+    r.size = weightedMedian(hist) || median(r.items.map(i => i.size));
+    const main = r.items.filter(i => i.size >= r.size * 0.9);
+    r.y = median((main.length ? main : r.items).map(i => i.y));
+    r.x = Math.min(...r.items.map(i => i.x));
+  }
+  return rows.sort((a, b) => b.y - a.y);
+}
+
+// Join a line's items. A word split across items (a soft hyphen, a kerning
+// break) leaves no horizontal gap, so only a real gap earns a space.
+function lineText(items) {
+  let out = "";
+  let prev = null;
+  for (const it of items) {
+    if (prev) {
+      const gap = it.x - (prev.x + (prev.width || 0));
+      if (gap > Math.max(0.8, it.size * 0.18)) out += " ";
+    }
+    out += it.str;
+    prev = it;
+  }
+  return normalizeGlyphs(out).replace(/\s+/g, " ").trim();
+}
+
+// A superscript reference: markedly smaller than the line, riding above its
+// baseline, and made of the glyphs footnotes actually use.
+function stripNoteMarks(row, body) {
+  const kept = row.items.filter(it => {
+    const small = it.size < body * 0.8 && it.size < row.size * 0.85;
+    const raised = it.y > row.y + row.size * 0.15;
+    return !(small && raised && NOTE_MARK.test(it.str.trim()));
+  });
+  return kept.length ? kept : row.items;
+}
+
+// Typical distance between consecutive body lines on a page.
+function pagePitch(rows, body) {
+  const bodyRows = rows.filter(r => Math.abs(r.size - body) < body * 0.15);
+  const from = bodyRows.length >= 3 ? bodyRows : rows;
+  return median(from.slice(1).map((r, i) => from[i].y - r.y).filter(d => d > 0)) || body * 1.2;
+}
+
+// Lines that might be page furniture. Position alone is not enough: this
+// article sets its running head 5 points inside an 8% band, at body size, so a
+// fixed band missed it entirely. A running head is also the first or last line
+// on its page and stands clear of the text block, so nominate on separation
+// too. Nomination is cheap, because recurrence across pages is the real filter.
+function furnitureCandidates(rows, pageHeight, pitch) {
+  const top = pageHeight * 0.92, bottom = pageHeight * 0.08;
+  const set = new Set(rows.filter(r => r.y >= top || r.y <= bottom));
+  if (rows.length > 2) {
+    const n = rows.length;
+    if (rows[0].y - rows[1].y > pitch * 2) set.add(rows[0]);
+    if (rows[n - 2].y - rows[n - 1].y > pitch * 2) set.add(rows[n - 1]);
+  }
+  return set;
+}
+
+const INDEX_LINE = /[,.]\s*\d+(\s*[,–-]\s*\d+)*\s*$/;
+const DOT_LEADER = /\.\s?\.\s?\./;
+
+function pdfPagesToMarkdown(pages, opts = {}) {
+  const body = opts.bodySize || bodySize(pages);
+  const ligatures = ligaturePlan(
+    pages.map(pg => pg.items.map(i => i.str).join(" ")).join(" ")
+  );
+  const prepared = pages.map(pg => ({
+    ...pg,
+    rows: groupLines(usableItems(pg.items), body),
+  }));
+
+  // --- running heads, running feet and folios -----------------------------
+  // Anything living in the top or bottom margin band that recurs across the
+  // book is furniture. Digits are stripped before counting so "page 7" and
+  // "page 8" are recognised as the same running foot.
+  for (const pg of prepared) {
+    pg.pitch = pagePitch(pg.rows, body);
+    pg.candidates = furnitureCandidates(pg.rows, pg.h, pg.pitch);
+  }
+
+  const bandCount = new Map();
+  for (const pg of prepared) {
+    for (const r of pg.candidates) {
+      const key = lineText(r.items).toLowerCase().replace(/\d+/g, "#").trim();
+      if (!key) continue;
+      bandCount.set(key, (bandCount.get(key) || 0) + 1);
+    }
+  }
+  const recurring = new Set(
+    [...bandCount].filter(([, n]) => n >= Math.max(2, prepared.length * 0.25)).map(([k]) => k)
+  );
+
+  for (const pg of prepared) {
+    const top = pg.h * 0.92, bottom = pg.h * 0.08;
+    pg.rows = pg.rows.filter(r => {
+      if (!pg.candidates.has(r)) return true;
+      const text = lineText(r.items);
+      const key = text.toLowerCase().replace(/\d+/g, "#").trim();
+      if (recurring.has(key)) return false;
+      // A bare folio needs no corroboration, but only inside the fixed band,
+      // where nothing else belongs.
+      if ((r.y >= top || r.y <= bottom) && /^[\divxlc]+$/i.test(text)) return false;
+      return true;
+    });
+  }
+
+  // --- index and contents pages -------------------------------------------
+  // Judged per page: a page mostly made of "entry, 12, 45" lines or dot
+  // leaders is a finding aid, and reading it aloud is worthless.
+  for (const pg of prepared) {
+    const texts = pg.rows.map(r => lineText(r.items)).filter(Boolean);
+    if (texts.length < 4) { pg.drop = false; continue; }
+    const hits = texts.filter(t => INDEX_LINE.test(t) || DOT_LEADER.test(t)).length;
+    pg.drop = hits / texts.length >= 0.6;
+  }
+
+  // --- footnote blocks -----------------------------------------------------
+  // Small print sitting below the last full-size line on its page. Anchoring
+  // to the last body line rather than to the page bottom matters, because a
+  // short page puts its notes well above the margin.
+  for (const pg of prepared) {
+    if (pg.drop) continue;
+    let lastBody = -Infinity;
+    for (const r of pg.rows) if (r.size >= body * 0.9) lastBody = Math.max(lastBody, -r.y);
+    lastBody = -lastBody;
+    pg.rows = pg.rows.filter(r => !(r.size < body * 0.85 && r.y < lastBody));
+  }
+
+  // --- headings ------------------------------------------------------------
+  // Size is the only signal available: pdfjs reports synthetic font names
+  // (g_d0_f1) with no weight, so boldness cannot be read off fontName.
+  const headingSizes = [...new Set(
+    prepared.filter(p => !p.drop).flatMap(p => p.rows)
+      .map(r => Math.round(r.size * 2) / 2)
+      .filter(sz => sz > body * 1.15)
+  )].sort((a, b) => b - a);
+  const levelOf = sz => {
+    const i = headingSizes.indexOf(Math.round(sz * 2) / 2);
+    return i < 0 ? 0 : Math.min(i + 1, 4);
+  };
+
+  // --- assemble ------------------------------------------------------------
+  const blocks = [];
+  let para = "";
+  const flush = () => { if (para.trim()) blocks.push(para.trim()); para = ""; };
+
+  for (const pg of prepared) {
+    if (pg.drop) continue;
+    const rows = pg.rows;
+    const pitch = pagePitch(rows, body);
+    const leftEdge = Math.min(...rows.map(r => r.x).filter(Number.isFinite));
+
+    rows.forEach((r, i) => {
+      const text = applyLigatures(lineText(stripNoteMarks(r, body)), ligatures);
+      if (!text) return;
+
+      const level = levelOf(r.size);
+      if (level) { flush(); blocks.push("#".repeat(level) + " " + text); return; }
+
+      if (i > 0) {
+        const gap = rows[i - 1].y - r.y;
+        const indented = r.x > leftEdge + Math.max(6, pg.w * 0.015);
+        if (gap > pitch * 1.35 || indented) flush();
+      }
+
+      if (!para) { para = text; return; }
+      if (/[‐-]$/.test(para) && /^[a-z]/.test(text)) para = para.slice(0, -1) + text;
+      else para += " " + text;
+    });
+
+    // Across a page break, only start a new paragraph if the previous page
+    // finished a sentence. Prose routinely runs on over the turn.
+    if (/[.!?]["'’”)]?$/.test(para.trim())) flush();
+  }
+  flush();
+
+  return blocks.join("\n\n");
+}
+
+// The only part that touches pdfjs.
+async function pdfExtractPages(bytes, onProgress) {
+  const base = window.ZAB_PDFJS_BASE || PDFJS_BASE;
+  let lib;
+  try {
+    lib = await import(/* @vite-ignore */ base + "pdf.mjs");
+  } catch (e) {
+    throw new Error(
+      "Could not load the PDF reader from the CDN. Reading a PDF needs network " +
+      "access to cdn.jsdelivr.net the first time. " + e.message
+    );
+  }
+  lib.GlobalWorkerOptions.workerSrc = base + "pdf.worker.mjs";
+
+  const doc = await lib.getDocument({ data: bytes }).promise;
+  const pages = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+    const vp = page.getViewport({ scale: 1 });
+    const tc = await page.getTextContent();
+    pages.push({
+      page: n, w: vp.width, h: vp.height,
+      items: tc.items.filter(i => i.str).map(i => {
+        // item.height is multiplied by an internal advance scale and disagrees
+        // between documents, so derive size and angle from the matrix.
+        const g = itemGeometry(i.transform);
+        return {
+          str: i.str, x: i.transform[4], y: i.transform[5],
+          size: g.size, rot: g.rot, width: i.width || 0,
+        };
+      }),
+    });
+    if (onProgress) onProgress(n, doc.numPages);
+  }
+  return pages;
+}
+
+function looksScanned(pages) {
+  const chars = pages.reduce((n, p) => n + p.items.reduce((m, i) => m + i.str.trim().length, 0), 0);
+  return pages.length > 0 && chars < pages.length * 20;
+}
+
+async function pdfToMarkdown(bytes, onProgress) {
+  const pages = await pdfExtractPages(bytes, onProgress);
+  if (looksScanned(pages)) {
+    throw new Error(
+      "This PDF has no text layer, so it is almost certainly scanned images. " +
+      "Reading it needs OCR, which this tool does not do. Run it through an OCR " +
+      "converter such as Marker, MinerU or Docling to get Markdown, then drop that in."
+    );
+  }
+  return pdfPagesToMarkdown(pages);
+}
+
+/* ------------------------------------------------------------------ *
+ * Audio encoding
+ * ------------------------------------------------------------------ */
+
+function toPcm16(float32) {
+  const pcm = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return pcm;
+}
+
+function encodeWav(float32, sampleRate = SAMPLE_RATE) {
+  const pcm = toPcm16(float32);
+  const buf = new ArrayBuffer(44 + pcm.length * 2);
+  const view = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  str(0, "RIFF");
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  str(8, "WAVE");
+  str(12, "fmt ");
+  view.setUint32(16, 16, true);              // fmt chunk size
+  view.setUint16(20, 1, true);               // format = PCM
+  view.setUint16(22, 1, true);               // channels = mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);  // byte rate
+  view.setUint16(32, 2, true);               // block align
+  view.setUint16(34, 16, true);              // bits per sample
+  str(36, "data");
+  view.setUint32(40, pcm.length * 2, true);
+  new Int16Array(buf, 44).set(pcm);
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+let lamePromise = null;
+async function encodeMp3(float32, sampleRate = SAMPLE_RATE, kbps = 128) {
+  lamePromise ||= import(LAMEJS_URL);
+  let lame;
+  try {
+    lame = await lamePromise;
+  } catch (e) {
+    lamePromise = null;
+    throw new Error("Could not load the MP3 encoder from the CDN. Choose WAV instead, or retry online. " + e.message);
+  }
+  const Mp3Encoder = lame.Mp3Encoder || lame.default?.Mp3Encoder;
+  if (!Mp3Encoder) throw new Error("lamejs loaded but exposed no Mp3Encoder.");
+
+  const enc = new Mp3Encoder(1, sampleRate, kbps);
+  const pcm = toPcm16(float32);
+  const parts = [];
+  const BLOCK = 1152; // one MPEG frame
+  for (let i = 0; i < pcm.length; i += BLOCK) {
+    const chunk = enc.encodeBuffer(pcm.subarray(i, Math.min(i + BLOCK, pcm.length)));
+    if (chunk.length) parts.push(new Uint8Array(chunk));
+  }
+  const tail = enc.flush();
+  if (tail.length) parts.push(new Uint8Array(tail));
+  return new Blob(parts, { type: "audio/mpeg" });
+}
+
+function concatFloat32(chunks) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const out = new Float32Array(n);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * ZIP archive, STORE only (no compression).
+ *
+ * The chapter files are already MP3 or WAV, so recompressing them buys
+ * nothing and would need a deflate implementation just to save clicking
+ * "Download every file" once instead of N times. STORE needs only a
+ * correct central directory and a CRC32 per entry, so this stays
+ * dependency-free the same way encodeWav above does.
+ * ------------------------------------------------------------------ */
+
+const CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (0xedb88320 ^ (c >>> 1)) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC32_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+// The ZIP format's timestamp has 2-second resolution and no timezone; exact
+// to the minute is all a "when this was made" field needs.
+function dosDateTime(d = new Date()) {
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  return { time, date };
+}
+
+// files: [{ name, data: Uint8Array }]. Kept as a pure function over bytes,
+// like encodeWav, rather than over Blobs, so it is testable without a model
+// or a network — the caller reads each Blob to bytes first.
+function createZip(files) {
+  const { time, date } = dosDateTime();
+  const enc = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  for (const { name, data } of files) {
+    const nameBytes = enc.encode(name);
+    const crc = crc32(data);
+
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);   // local file header signature
+    local.setUint16(4, 20, true);           // version needed to extract
+    local.setUint16(6, 0, true);            // general purpose flag
+    local.setUint16(8, 0, true);            // method 0 = stored
+    local.setUint16(10, time, true);
+    local.setUint16(12, date, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, data.length, true); // compressed size == uncompressed
+    local.setUint32(22, data.length, true);
+    local.setUint16(26, nameBytes.length, true);
+    local.setUint16(28, 0, true);           // extra field length
+    localParts.push(new Uint8Array(local.buffer), nameBytes, data);
+
+    const central = new DataView(new ArrayBuffer(46));
+    central.setUint32(0, 0x02014b50, true); // central directory header signature
+    central.setUint16(4, 20, true);         // version made by
+    central.setUint16(6, 20, true);         // version needed to extract
+    central.setUint16(8, 0, true);
+    central.setUint16(10, 0, true);
+    central.setUint16(12, time, true);
+    central.setUint16(14, date, true);
+    central.setUint32(16, crc, true);
+    central.setUint32(20, data.length, true);
+    central.setUint32(24, data.length, true);
+    central.setUint16(28, nameBytes.length, true);
+    central.setUint16(30, 0, true);         // extra field length
+    central.setUint16(32, 0, true);         // file comment length
+    central.setUint16(34, 0, true);         // disk number start
+    central.setUint16(36, 0, true);         // internal file attributes
+    central.setUint32(38, 0, true);         // external file attributes
+    central.setUint32(42, offset, true);    // offset of this entry's local header
+    centralParts.push(new Uint8Array(central.buffer), nameBytes);
+
+    offset += 30 + nameBytes.length + data.length;
+  }
+
+  const centralStart = offset;
+  const centralSize = centralParts.reduce((n, p) => n + p.length, 0);
+
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);       // end of central directory signature
+  end.setUint16(4, 0, true);
+  end.setUint16(6, 0, true);
+  end.setUint16(8, files.length, true);     // entries on this disk
+  end.setUint16(10, files.length, true);    // entries in total
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, centralStart, true);
+  end.setUint16(20, 0, true);               // comment length
+
+  return new Blob([...localParts, ...centralParts, new Uint8Array(end.buffer)],
+                   { type: "application/zip" });
+}
+
+async function blobToZipEntry(name, blob) {
+  return { name, data: new Uint8Array(await blob.arrayBuffer()) };
+}
+
+/* ------------------------------------------------------------------ *
+ * UI
+ * ------------------------------------------------------------------ */
+
+const $ = id => document.getElementById(id);
+const els = {
+  drop: $("drop"), file: $("file"), md: $("md"), stats: $("stats"),
+  voice: $("voice"), speed: $("speed"), format: $("format"), split: $("split"),
+  device: $("device"), dtype: $("dtype"), code: $("code"), tables: $("tables"),
+  numberLists: $("numberLists"), preview: $("preview"),
+  go: $("go"), cancel: $("cancel"), bar: $("bar"), barWrap: $("barWrap"), log: $("log"),
+  results: $("results"), tracks: $("tracks"), dlAll: $("dlAll"), dlZip: $("dlZip"),
+  fileHint: $("fileHint"), fatal: $("fatal"),
+};
+
+// Shown before the model loads; replaced by tts.list_voices() once it has.
+const VOICES = [
+  ["American English", [
+    ["af_heart", "Heart (F)"], ["af_bella", "Bella (F)"], ["af_nicole", "Nicole (F)"],
+    ["af_sarah", "Sarah (F)"], ["af_kore", "Kore (F)"], ["af_aoede", "Aoede (F)"],
+    ["af_nova", "Nova (F)"], ["af_sky", "Sky (F)"],
+    ["am_michael", "Michael (M)"], ["am_puck", "Puck (M)"], ["am_fenrir", "Fenrir (M)"],
+    ["am_adam", "Adam (M)"], ["am_echo", "Echo (M)"], ["am_onyx", "Onyx (M)"],
+  ]],
+  ["British English", [
+    ["bf_emma", "Emma (F)"], ["bf_isabella", "Isabella (F)"], ["bf_alice", "Alice (F)"],
+    ["bf_lily", "Lily (F)"], ["bm_george", "George (M)"], ["bm_fable", "Fable (M)"],
+    ["bm_daniel", "Daniel (M)"], ["bm_lewis", "Lewis (M)"],
+  ]],
+];
+
+function fillVoices(groups, selected = "af_heart") {
+  els.voice.innerHTML = "";
+  for (const [label, list] of groups) {
+    const og = document.createElement("optgroup");
+    og.label = label;
+    for (const [id, name] of list) {
+      const o = document.createElement("option");
+      o.value = id;
+      o.textContent = id === name ? id : `${name} — ${id}`;
+      og.appendChild(o);
+    }
+    els.voice.appendChild(og);
+  }
+  els.voice.value = selected;
+  if (!els.voice.value) els.voice.selectedIndex = 0;
+}
+fillVoices(VOICES);
+
+if (location.protocol === "file:") els.fileHint.classList.remove("hidden");
+
+function log(msg) { els.log.textContent = msg; }
+function progress(frac) {
+  els.barWrap.classList.toggle("hidden", frac == null);
+  if (frac != null) els.bar.style.width = Math.max(0, Math.min(1, frac)) * 100 + "%";
+}
+function fatal(msg) {
+  els.fatal.textContent = msg;
+  els.fatal.classList.remove("hidden");
+}
+
+function currentOpts() {
+  return {
+    code: els.code.value,
+    tables: els.tables.value,
+    numberLists: els.numberLists.checked,
+  };
+}
+
+let docTitle = "audiobook";
+
+function refresh() {
+  const { body, title } = stripFrontMatter(els.md.value);
+  if (title) docTitle = slugify(title, "audiobook");
+  const tokens = tokenizeMarkdown(body);
+  const opts = currentOpts();
+  const text = tokensToSpeech(tokens, opts);
+
+  els.preview.textContent = text || "(nothing to read yet)";
+  if (!text) { els.stats.textContent = ""; return; }
+
+  const words = wordCount(text);
+  const mins = words / 150 / (+els.speed.value || 1);
+  const parts = sectionsWithText(tokens, +els.split.value, opts).length;
+  els.stats.textContent =
+    `${words.toLocaleString()} words · ${text.length.toLocaleString()} characters · ` +
+    `${parts} ${parts === 1 ? "part" : "parts"} · roughly ${mins < 1 ? "<1" : Math.round(mins)} min of audio`;
+}
+
+async function loadFile(f) {
+  docTitle = slugify(f.name.replace(/\.[^.]+$/, ""), "audiobook");
+  els.fatal.classList.add("hidden");
+
+  const isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+  if (!isPdf) {
+    els.md.value = await f.text();
+    refresh();
+    return;
+  }
+
+  els.go.disabled = true;
+  log("Reading the PDF\u2026");
+  try {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    els.md.value = await pdfToMarkdown(bytes, (n, total) => {
+      progress(n / total);
+      log(`Reading the PDF \u2014 page ${n} of ${total}`);
+    });
+    progress(null);
+    log("PDF converted. Check the text below before generating: headings, " +
+        "running heads and footnotes are guessed, so fix anything wrong here.");
+    refresh();
+  } catch (e) {
+    console.error(e);
+    progress(null);
+    log("");
+    els.md.value = "";
+    refresh();
+    fatal(e.message || String(e));
+  } finally {
+    els.go.disabled = false;
+  }
+}
+
+els.drop.addEventListener("click", () => els.file.click());
+els.file.addEventListener("change", e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+for (const ev of ["dragenter", "dragover"]) {
+  els.drop.addEventListener(ev, e => { e.preventDefault(); els.drop.classList.add("over"); });
+}
+for (const ev of ["dragleave", "drop"]) {
+  els.drop.addEventListener(ev, e => { e.preventDefault(); els.drop.classList.remove("over"); });
+}
+els.drop.addEventListener("drop", e => { if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.speed]) {
+  el.addEventListener("input", refresh);
+  el.addEventListener("change", refresh);
+}
+
+/* ---- synthesis ---- */
+
+let tts = null;
+let ttsKey = "";            // "<device>|<dtype>" the cached model was built with
+let TextSplitterStream = null;
+let cancelled = false;
+const objectUrls = [];
+const trackFiles = []; // { name, blob } for every track currently listed, for the zip button
+
+function pickDevice() {
+  if (els.device.value !== "auto") return els.device.value;
+  return navigator.gpu ? "webgpu" : "wasm";
+}
+function pickDtype(device) {
+  if (els.dtype.value !== "auto") return els.dtype.value;
+  // q8 kernels are the well-trodden path on WASM; WebGPU is happiest in fp32.
+  return device === "webgpu" ? "fp32" : "q8";
+}
+
+async function ensureModel(device, dtype) {
+  const key = `${device}|${dtype}`;
+  if (tts && ttsKey === key) return tts;
+  if (tts) {
+    // Device or precision changed, so the cached model is the wrong one.
+    // Without this the dropdowns silently do nothing after the first run.
+    try { tts.model?.dispose?.(); } catch { /* best effort; not all builds expose it */ }
+    tts = null;
+    ttsKey = "";
+  }
+  log(`Loading Kokoro-82M (${device}, ${dtype})… the first run downloads the weights.`);
+
+  let mod;
+  try {
+    mod = await import(KOKORO_URL);
+  } catch (e) {
+    throw new Error(
+      "Could not load kokoro-js from the CDN. The first run needs network access to " +
+      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
+    );
+  }
+  TextSplitterStream = mod.TextSplitterStream;
+
+  const seen = new Map();
+  tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
+    dtype, device,
+    progress_callback: p => {
+      if (!p || !p.file) return;
+      if (p.status === "progress" && p.total) {
+        seen.set(p.file, { loaded: p.loaded, total: p.total });
+        let loaded = 0, total = 0;
+        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
+        progress(loaded / total);
+        log(`Downloading model — ${(loaded / 1048576).toFixed(1)} MB of ${(total / 1048576).toFixed(1)} MB`);
+      }
+    },
+  });
+  ttsKey = key;
+
+  try {
+    const list = tts.list_voices?.();
+    const ids = Array.isArray(list) ? list : Object.keys(list || {});
+    if (ids.length) fillVoices([["Voices", ids.map(id => [id, id])]], els.voice.value);
+  } catch { /* keep the static list */ }
+
+  progress(null);
+  return tts;
+}
+
+async function synthSection(text, voice, speed, onChunk) {
+  const splitter = new TextSplitterStream();
+  const stream = tts.stream(splitter, { voice, speed });
+  const chunks = [];
+
+  // Start consuming before pushing, so a splitter that applies backpressure
+  // cannot deadlock against a large document.
+  const consume = (async () => {
+    for await (const item of stream) {
+      if (cancelled) break;
+      const data = item.audio?.audio ?? item.audio;
+      if (data?.length) { chunks.push(data); onChunk(data.length); }
+    }
+  })();
+
+  splitter.push(capLongRuns(text));
+  splitter.close();
+  await consume;
+  return concatFloat32(chunks);
+}
+
+function fmtTime(s) {
+  const m = Math.floor(s / 60), sec = Math.round(s % 60);
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function addTrack(name, filename, blob, seconds, first = false) {
+  const url = URL.createObjectURL(blob);
+  objectUrls.push(url);
+
+  const div = document.createElement("div");
+  div.className = "track";
+  const top = document.createElement("div");
+  top.className = "top";
+  const b = document.createElement("b");
+  b.textContent = name;
+  const right = document.createElement("small");
+  right.textContent = `${fmtTime(seconds)} · ${(blob.size / 1048576).toFixed(1)} MB  `;
+  const a = document.createElement("a");
+  a.className = "dl";
+  a.href = url;
+  a.download = filename;
+  a.textContent = "Download";
+  right.appendChild(a);
+  top.append(b, right);
+
+  const audio = document.createElement("audio");
+  audio.controls = true;
+  audio.preload = "none";
+  audio.src = url;
+  div.append(top, audio);
+
+  if (first) { els.tracks.prepend(div); trackFiles.unshift({ name: filename, blob }); }
+  else { els.tracks.appendChild(div); trackFiles.push({ name: filename, blob }); }
+  els.results.classList.remove("hidden");
+}
+
+async function generate() {
+  cancelled = false;
+  els.fatal.classList.add("hidden");
+  els.go.disabled = true;
+  els.cancel.classList.remove("hidden");
+  els.results.classList.add("hidden");
+  els.tracks.innerHTML = "";
+  for (const u of objectUrls.splice(0)) URL.revokeObjectURL(u);
+  trackFiles.length = 0;
+
+  const opts = currentOpts();
+  const { body } = stripFrontMatter(els.md.value);
+  const tokens = tokenizeMarkdown(body);
+  const sections = sectionsWithText(tokens, +els.split.value, opts);
+
+  if (!sections.length) {
+    fatal("There is no readable text in that document.");
+    els.go.disabled = false;
+    els.cancel.classList.add("hidden");
+    return;
+  }
+
+  const totalChars = sections.reduce((n, s) => n + s.text.length, 0);
+  const voice = els.voice.value;
+  const speed = +els.speed.value || 1;
+  const fmt = els.format.value;
+  const device = pickDevice();
+
+  try {
+    await ensureModel(device, pickDtype(device));
+
+    const t0 = performance.now();
+    let doneChars = 0, totalSamples = 0;
+    const all = [];
+
+    for (let i = 0; i < sections.length; i++) {
+      if (cancelled) break;
+      const s = sections[i];
+      const label = s.title || (sections.length > 1 ? `Part ${i + 1}` : "Audiobook");
+
+      const audio = await synthSection(s.text, voice, speed, added => {
+        totalSamples += added;
+        const secs = totalSamples / SAMPLE_RATE;
+        const elapsed = (performance.now() - t0) / 1000;
+        // Mid-section the character count is only half-consumed; good enough for a bar.
+        progress((doneChars + s.text.length * 0.5) / totalChars);
+        log(`[${i + 1}/${sections.length}] ${label} — ${fmtTime(secs)} of audio · ` +
+            `${elapsed.toFixed(1)}s elapsed · RTF ${(elapsed / Math.max(secs, 0.001)).toFixed(2)}x`);
+      });
+
+      doneChars += s.text.length;
+      progress(doneChars / totalChars);
+      if (cancelled) break;
+      if (!audio.length) continue;
+
+      all.push(audio);
+      if (sections.length > 1) {
+        const n = String(i + 1).padStart(2, "0");
+        const blob = fmt === "mp3" ? await encodeMp3(audio) : encodeWav(audio);
+        addTrack(label, `${n}-${slugify(label, "part-" + n)}.${fmt}`, blob, audio.length / SAMPLE_RATE);
+      }
+    }
+
+    if (cancelled) { log("Cancelled."); return; }
+    if (!all.length) { fatal("No audio was produced."); return; }
+
+    log("Encoding the complete book…");
+    const full = concatFloat32(all);
+    const blob = fmt === "mp3" ? await encodeMp3(full) : encodeWav(full);
+    addTrack("Complete book", `${docTitle}.${fmt}`, blob, full.length / SAMPLE_RATE, true);
+
+    const elapsed = (performance.now() - t0) / 1000;
+    const secs = full.length / SAMPLE_RATE;
+    log(`Done — ${fmtTime(secs)} of audio in ${elapsed.toFixed(1)}s ` +
+        `(RTF ${(elapsed / secs).toFixed(2)}x, ${(secs / elapsed).toFixed(1)}x faster than real time) on ${device}.`);
+    progress(null);
+  } catch (e) {
+    console.error(e);
+    fatal(e.message || String(e));
+    log("");
+    progress(null);
+  } finally {
+    els.go.disabled = false;
+    els.cancel.classList.add("hidden");
+  }
+}
+
+els.go.addEventListener("click", generate);
+els.cancel.addEventListener("click", () => { cancelled = true; log("Cancelling…"); });
+els.dlAll.addEventListener("click", () => {
+  for (const a of els.tracks.querySelectorAll("a.dl")) a.click();
+});
+
+// De-dupe names before they hit the zip: two chapters could in principle
+// slugify to the same thing, and a zip with two identical entry names is
+// not something most unzip tools recover gracefully from.
+function uniqueZipNames(files) {
+  const seen = new Map();
+  return files.map(f => {
+    const n = seen.get(f.name) || 0;
+    seen.set(f.name, n + 1);
+    if (!n) return f.name;
+    const dot = f.name.lastIndexOf(".");
+    return dot < 0 ? `${f.name}-${n}` : `${f.name.slice(0, dot)}-${n}${f.name.slice(dot)}`;
+  });
+}
+
+els.dlZip.addEventListener("click", async () => {
+  if (!trackFiles.length) return;
+  const prevText = els.dlZip.textContent;
+  els.dlZip.disabled = true;
+  els.dlZip.textContent = "Zipping…";
+  try {
+    const names = uniqueZipNames(trackFiles);
+    const entries = await Promise.all(
+      trackFiles.map((f, i) => blobToZipEntry(names[i], f.blob))
+    );
+    const zip = createZip(entries);
+    const url = URL.createObjectURL(zip);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${docTitle}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (e) {
+    console.error(e);
+    fatal("Could not build the zip file: " + (e.message || e));
+  } finally {
+    els.dlZip.disabled = false;
+    els.dlZip.textContent = prevText;
+  }
+});
+
+// Exposed so the text and encoding pipeline can be exercised without the model.
+window.ZAB = {
+  stripFrontMatter, tokenizeMarkdown, inlineToSpeech, tokensToSpeech,
+  splitSections, mdToSpeech, slugify, decodeEntities, capLongRuns, MAX_RUN,
+  MIN_SECTION_WORDS, wordCount, mergeShortSections, sectionsWithText,
+  pdfPagesToMarkdown, pdfExtractPages, pdfToMarkdown, looksScanned,
+  bodySize, groupLines, lineText, normalizeGlyphs,
+  itemGeometry, isUpright, repairLigatures, ligaturePlan, applyLigatures,
+  pagePitch, furnitureCandidates,
+  encodeWav, encodeMp3, toPcm16, concatFloat32, SAMPLE_RATE,
+  crc32, dosDateTime, createZip, uniqueZipNames, blobToZipEntry, addTrack,
+};
+
+refresh();
+window.dispatchEvent(new Event("zab-ready"));
+</script>
+</body>
+</html>

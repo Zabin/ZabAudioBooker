@@ -227,6 +227,13 @@ combined file for the whole book, each with an inline player and a download
 link. MP3 (128 kbps) keeps an audiobook to a sensible size; WAV is 24 kHz mono
 PCM and runs about 170 MB per hour, so prefer MP3 for anything long.
 
+Once generation finishes, **Download every file** fires off a browser
+download for each track in turn, and **Download all as .zip** bundles all
+of them — the combined file and every chapter — into one `.zip` next to it.
+The zip is written client-side with no library: the audio is already MP3 or
+WAV, so there is nothing to gain from recompressing it, and a plain
+uncompressed (STORE) archive needs only a small amount of bookkeeping.
+
 Progress is reported the same way the CLI reports it — audio produced, elapsed
 time, and a live RTF figure — and long runs can be cancelled mid-way.
 

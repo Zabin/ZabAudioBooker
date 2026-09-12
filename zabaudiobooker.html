@@ -260,6 +260,7 @@
     <h2>4 · Result</h2>
     <div class="row" style="margin-bottom:8px">
       <button id="dlAll">Download every file</button>
+      <button id="dlZip">Download all as .zip</button>
     </div>
     <div id="tracks"></div>
   </section>
@@ -1019,6 +1020,112 @@ function concatFloat32(chunks) {
 }
 
 /* ------------------------------------------------------------------ *
+ * ZIP archive, STORE only (no compression).
+ *
+ * The chapter files are already MP3 or WAV, so recompressing them buys
+ * nothing and would need a deflate implementation just to save clicking
+ * "Download every file" once instead of N times. STORE needs only a
+ * correct central directory and a CRC32 per entry, so this stays
+ * dependency-free the same way encodeWav above does.
+ * ------------------------------------------------------------------ */
+
+const CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (0xedb88320 ^ (c >>> 1)) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC32_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+// The ZIP format's timestamp has 2-second resolution and no timezone; exact
+// to the minute is all a "when this was made" field needs.
+function dosDateTime(d = new Date()) {
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  return { time, date };
+}
+
+// files: [{ name, data: Uint8Array }]. Kept as a pure function over bytes,
+// like encodeWav, rather than over Blobs, so it is testable without a model
+// or a network — the caller reads each Blob to bytes first.
+function createZip(files) {
+  const { time, date } = dosDateTime();
+  const enc = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  for (const { name, data } of files) {
+    const nameBytes = enc.encode(name);
+    const crc = crc32(data);
+
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);   // local file header signature
+    local.setUint16(4, 20, true);           // version needed to extract
+    local.setUint16(6, 0, true);            // general purpose flag
+    local.setUint16(8, 0, true);            // method 0 = stored
+    local.setUint16(10, time, true);
+    local.setUint16(12, date, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, data.length, true); // compressed size == uncompressed
+    local.setUint32(22, data.length, true);
+    local.setUint16(26, nameBytes.length, true);
+    local.setUint16(28, 0, true);           // extra field length
+    localParts.push(new Uint8Array(local.buffer), nameBytes, data);
+
+    const central = new DataView(new ArrayBuffer(46));
+    central.setUint32(0, 0x02014b50, true); // central directory header signature
+    central.setUint16(4, 20, true);         // version made by
+    central.setUint16(6, 20, true);         // version needed to extract
+    central.setUint16(8, 0, true);
+    central.setUint16(10, 0, true);
+    central.setUint16(12, time, true);
+    central.setUint16(14, date, true);
+    central.setUint32(16, crc, true);
+    central.setUint32(20, data.length, true);
+    central.setUint32(24, data.length, true);
+    central.setUint16(28, nameBytes.length, true);
+    central.setUint16(30, 0, true);         // extra field length
+    central.setUint16(32, 0, true);         // file comment length
+    central.setUint16(34, 0, true);         // disk number start
+    central.setUint16(36, 0, true);         // internal file attributes
+    central.setUint32(38, 0, true);         // external file attributes
+    central.setUint32(42, offset, true);    // offset of this entry's local header
+    centralParts.push(new Uint8Array(central.buffer), nameBytes);
+
+    offset += 30 + nameBytes.length + data.length;
+  }
+
+  const centralStart = offset;
+  const centralSize = centralParts.reduce((n, p) => n + p.length, 0);
+
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);       // end of central directory signature
+  end.setUint16(4, 0, true);
+  end.setUint16(6, 0, true);
+  end.setUint16(8, files.length, true);     // entries on this disk
+  end.setUint16(10, files.length, true);    // entries in total
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, centralStart, true);
+  end.setUint16(20, 0, true);               // comment length
+
+  return new Blob([...localParts, ...centralParts, new Uint8Array(end.buffer)],
+                   { type: "application/zip" });
+}
+
+async function blobToZipEntry(name, blob) {
+  return { name, data: new Uint8Array(await blob.arrayBuffer()) };
+}
+
+/* ------------------------------------------------------------------ *
  * UI
  * ------------------------------------------------------------------ */
 
@@ -1029,7 +1136,7 @@ const els = {
   device: $("device"), dtype: $("dtype"), code: $("code"), tables: $("tables"),
   numberLists: $("numberLists"), preview: $("preview"),
   go: $("go"), cancel: $("cancel"), bar: $("bar"), barWrap: $("barWrap"), log: $("log"),
-  results: $("results"), tracks: $("tracks"), dlAll: $("dlAll"),
+  results: $("results"), tracks: $("tracks"), dlAll: $("dlAll"), dlZip: $("dlZip"),
   fileHint: $("fileHint"), fatal: $("fatal"),
 };
 
@@ -1163,6 +1270,7 @@ let ttsKey = "";            // "<device>|<dtype>" the cached model was built wit
 let TextSplitterStream = null;
 let cancelled = false;
 const objectUrls = [];
+const trackFiles = []; // { name, blob } for every track currently listed, for the zip button
 
 function pickDevice() {
   if (els.device.value !== "auto") return els.device.value;
@@ -1275,7 +1383,8 @@ function addTrack(name, filename, blob, seconds, first = false) {
   audio.src = url;
   div.append(top, audio);
 
-  if (first) els.tracks.prepend(div); else els.tracks.appendChild(div);
+  if (first) { els.tracks.prepend(div); trackFiles.unshift({ name: filename, blob }); }
+  else { els.tracks.appendChild(div); trackFiles.push({ name: filename, blob }); }
   els.results.classList.remove("hidden");
 }
 
@@ -1287,6 +1396,7 @@ async function generate() {
   els.results.classList.add("hidden");
   els.tracks.innerHTML = "";
   for (const u of objectUrls.splice(0)) URL.revokeObjectURL(u);
+  trackFiles.length = 0;
 
   const opts = currentOpts();
   const { body } = stripFrontMatter(els.md.value);
@@ -1371,6 +1481,48 @@ els.dlAll.addEventListener("click", () => {
   for (const a of els.tracks.querySelectorAll("a.dl")) a.click();
 });
 
+// De-dupe names before they hit the zip: two chapters could in principle
+// slugify to the same thing, and a zip with two identical entry names is
+// not something most unzip tools recover gracefully from.
+function uniqueZipNames(files) {
+  const seen = new Map();
+  return files.map(f => {
+    const n = seen.get(f.name) || 0;
+    seen.set(f.name, n + 1);
+    if (!n) return f.name;
+    const dot = f.name.lastIndexOf(".");
+    return dot < 0 ? `${f.name}-${n}` : `${f.name.slice(0, dot)}-${n}${f.name.slice(dot)}`;
+  });
+}
+
+els.dlZip.addEventListener("click", async () => {
+  if (!trackFiles.length) return;
+  const prevText = els.dlZip.textContent;
+  els.dlZip.disabled = true;
+  els.dlZip.textContent = "Zipping…";
+  try {
+    const names = uniqueZipNames(trackFiles);
+    const entries = await Promise.all(
+      trackFiles.map((f, i) => blobToZipEntry(names[i], f.blob))
+    );
+    const zip = createZip(entries);
+    const url = URL.createObjectURL(zip);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${docTitle}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (e) {
+    console.error(e);
+    fatal("Could not build the zip file: " + (e.message || e));
+  } finally {
+    els.dlZip.disabled = false;
+    els.dlZip.textContent = prevText;
+  }
+});
+
 // Exposed so the text and encoding pipeline can be exercised without the model.
 window.ZAB = {
   stripFrontMatter, tokenizeMarkdown, inlineToSpeech, tokensToSpeech,
@@ -1381,6 +1533,7 @@ window.ZAB = {
   itemGeometry, isUpright, repairLigatures, ligaturePlan, applyLigatures,
   pagePitch, furnitureCandidates,
   encodeWav, encodeMp3, toPcm16, concatFloat32, SAMPLE_RATE,
+  crc32, dosDateTime, createZip, uniqueZipNames, blobToZipEntry, addTrack,
 };
 
 refresh();

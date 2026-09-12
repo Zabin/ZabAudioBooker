@@ -85,6 +85,9 @@ rules are opinions — tell me where mine are wrong.
 - [ ] MP3 generates, downloads and plays in your normal music player.
 - [ ] WAV generates, downloads and plays.
 - [ ] File sizes look sane (MP3 roughly 1 MB per minute).
+- [ ] **Download all as .zip** produces one `.zip` that your OS opens
+      normally, containing the complete book and every chapter file, and
+      each one plays back correctly after extracting.
 
 ### 5. Settings
 

@@ -118,7 +118,9 @@ faster than real time. You can click **Cancel** at any point.
 
 Press play to listen in the page, or click **Download** to save. **Download
 every file** saves all of them at once (your browser may ask permission to
-download multiple files — say yes).
+download multiple files — say yes). **Download all as .zip** does the same
+thing but as one file, which is easier to move around or send to someone
+else — everything comes out into a single `.zip` you can open normally.
 
 ### Every setting explained
 

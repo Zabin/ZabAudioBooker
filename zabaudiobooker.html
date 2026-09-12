@@ -447,6 +447,30 @@ function inlineToSpeech(s, opts = {}) {
 // Kokoro's splitter breaks on sentence boundaries, so give every block one.
 function endSentence(s) { return /[.!?]["')\]]?$/.test(s) ? s : s + "."; }
 
+// Kokoro's context is 510 phoneme tokens, and TextSplitterStream only breaks on
+// sentence boundaries. A run carrying no terminal punctuation therefore reaches
+// the model whole and gets truncated: code read aloud has none at all, and a
+// long comma-spliced sentence has none either. Cap such runs on a word boundary
+// so they arrive as several sentences instead of one over-long one. Applied
+// when feeding the model, not in the preview, which shows the readable text.
+const MAX_RUN = 300; // characters; conservative, since symbols phonemize long
+
+function capLongRuns(text, max = MAX_RUN) {
+  const out = [];
+  for (const unit of text.match(/[^.!?]+[.!?]*\s*/g) || [text]) {
+    let rest = unit.trim();
+    if (!rest) continue;
+    while (rest.length > max) {
+      let cut = rest.lastIndexOf(" ", max);
+      if (cut <= 0) cut = max;          // a single unbroken token: cut it anyway
+      out.push(endSentence(rest.slice(0, cut).trim()));
+      rest = rest.slice(cut).trim();
+    }
+    if (rest) out.push(rest);
+  }
+  return out.join(" ");
+}
+
 function tokensToSpeech(tokens, opts = {}) {
   const out = [];
   for (const t of tokens) {
@@ -691,6 +715,7 @@ for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.
 /* ---- synthesis ---- */
 
 let tts = null;
+let ttsKey = "";            // "<device>|<dtype>" the cached model was built with
 let TextSplitterStream = null;
 let cancelled = false;
 const objectUrls = [];
@@ -706,7 +731,15 @@ function pickDtype(device) {
 }
 
 async function ensureModel(device, dtype) {
-  if (tts) return tts;
+  const key = `${device}|${dtype}`;
+  if (tts && ttsKey === key) return tts;
+  if (tts) {
+    // Device or precision changed, so the cached model is the wrong one.
+    // Without this the dropdowns silently do nothing after the first run.
+    try { tts.model?.dispose?.(); } catch { /* best effort; not all builds expose it */ }
+    tts = null;
+    ttsKey = "";
+  }
   log(`Loading Kokoro-82M (${device}, ${dtype})… the first run downloads the weights.`);
 
   let mod;
@@ -734,6 +767,7 @@ async function ensureModel(device, dtype) {
       }
     },
   });
+  ttsKey = key;
 
   try {
     const list = tts.list_voices?.();
@@ -760,7 +794,7 @@ async function synthSection(text, voice, speed, onChunk) {
     }
   })();
 
-  splitter.push(text);
+  splitter.push(capLongRuns(text));
   splitter.close();
   await consume;
   return concatFloat32(chunks);
@@ -898,7 +932,7 @@ els.dlAll.addEventListener("click", () => {
 // Exposed so the text and encoding pipeline can be exercised without the model.
 window.ZAB = {
   stripFrontMatter, tokenizeMarkdown, inlineToSpeech, tokensToSpeech,
-  splitSections, mdToSpeech, slugify, decodeEntities,
+  splitSections, mdToSpeech, slugify, decodeEntities, capLongRuns, MAX_RUN,
   encodeWav, encodeMp3, toPcm16, concatFloat32, SAMPLE_RATE,
 };
 

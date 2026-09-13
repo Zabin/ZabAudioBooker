@@ -2185,10 +2185,18 @@ function getWorker() {
   worker.onmessage = e => onWorkerMessage(e.data);
   worker.onerror = e => {
     console.error(e);
-    fatal("The synthesis worker crashed: " + (e.message || e));
-    // Otherwise a crash mid-book leaves runGenerateJob's promise pending
-    // forever and the UI stuck in "generating".
-    if (activeJob) { const job = activeJob; activeJob = null; job.reject(new Error(e.message || "worker crashed")); }
+    // A worker that threw an uncaught error once does not reliably keep
+    // processing later messages (observed directly: a second postMessage
+    // after a crash produced no activity at all) — drop this instance so
+    // the next getWorker() call spins up a fresh one instead of silently
+    // hanging forever on every attempt after the first crash.
+    worker = null;
+    const message = "The synthesis worker crashed unexpectedly" + (e.message ? ` (${e.message})` : "") +
+      ". This has been seen with unusually short input text — try again with a little more text. " +
+      "A fresh attempt will start a new worker.";
+    fatal(message);
+    if (activeJob) { const job = activeJob; activeJob = null; job.reject(new Error(message)); }
+    if (previewInFlight) resetPreviewButton();
   };
   return worker;
 }
@@ -2248,6 +2256,13 @@ let cancelled = false;
 let jobSeq = 0;
 let activeJob = null; // { jobId, resolve, reject, bookLabel, bookIndex, bookCount, flatPrefix, zipPrefix, docTitle, ext }
 let previewUrl = null;
+let previewInFlight = false; // set while a preview request is outstanding; nothing else tracks it (no jobId)
+
+function resetPreviewButton() {
+  previewInFlight = false;
+  els.previewVoice.disabled = false;
+  els.previewVoice.textContent = "▶ Preview";
+}
 
 function onWorkerMessage(msg) {
   if (msg.evt === "modelProgress") {
@@ -2272,8 +2287,19 @@ function onWorkerMessage(msg) {
     els.previewAudio.src = previewUrl;
     els.previewAudio.classList.remove("hidden");
     els.previewAudio.play().catch(() => {}); // autoplay can be blocked; the controls still work
-    els.previewVoice.disabled = false;
-    els.previewVoice.textContent = "▶ Preview";
+    resetPreviewButton();
+    return;
+  }
+  // A preview's own error path (cmd:"preview" posts {evt:"error"} with no
+  // jobId) has to be caught here, before the activeJob/jobId gate below —
+  // that gate is scoped to generate() jobs and would otherwise silently
+  // drop every preview failure, leaving the button stuck on "Loading…"
+  // forever with no feedback at all.
+  if (msg.evt === "error" && msg.jobId == null) {
+    if (previewInFlight) {
+      resetPreviewButton();
+      fatal(msg.message || "The voice preview failed.");
+    }
     return;
   }
 
@@ -2323,8 +2349,10 @@ function runGenerateJob(sections, settings, bookMeta) {
 }
 
 els.previewVoice.addEventListener("click", () => {
-  if (activeJob) return; // the worker is mid-book; wait rather than interleave with it
+  if (activeJob || previewInFlight) return; // the worker is busy; wait rather than interleave with it
+  els.fatal.classList.add("hidden");
   const sample = "This is what your audiobook will sound like.";
+  previewInFlight = true;
   els.previewVoice.disabled = true;
   els.previewVoice.textContent = "Loading…";
   const device = pickDevice();

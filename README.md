@@ -21,8 +21,10 @@ when it genuinely needs a human ear or a real player.
 
 - Markdown, EPUB and PDF in, MP3, WAV or M4B out — one file per chapter plus a combined file.
 - Drop several documents at once to queue up a batch and generate them unattended.
-- Runs on your own machine; nothing is uploaded. Synthesis runs on a background
-  thread, so the page stays responsive while a long book is generating.
+- Runs on your own machine; nothing is uploaded. WASM/CPU synthesis runs on a
+  background thread, so the page stays responsive while a long book is
+  generating; WebGPU synthesis runs directly, since it's fast enough that a
+  brief pause is a fair trade for it (see Performance below).
 - WebGPU when the browser exposes it, WASM on the CPU otherwise.
 - Understands Markdown structure rather than reading the punctuation aloud.
 - Multilingual voices: English (US/GB), Spanish, French, Italian, Portuguese (BR), Hindi, Japanese, Mandarin.
@@ -58,11 +60,16 @@ A current browser and, on first run only, network access to `cdn.jsdelivr.net`
 (for [kokoro-js](https://www.npmjs.com/package/kokoro-js), the MP3 encoder,
 and — only if you open an EPUB — the unzip library) and `huggingface.co` (for
 the weights). Audio is held in memory while it is generated, so a very long
-book on a low-memory machine is better done a few chapters at a time.
+book on a low-memory machine is better done a few chapters at a time — or
+lower **Max chunk length** (see Output below) so no single piece gets too
+large regardless of how the document is split into chapters.
 
-Synthesis runs in a Web Worker, which needs a browser with module worker
-support (Chrome and Edge; Firefox and Safari support varies) — this is the
-same Chrome/Edge recommendation as WebGPU above, not an extra requirement.
+WASM/CPU synthesis runs in a Web Worker so the tab stays responsive during a
+long run; this needs nothing beyond ordinary Worker support, which every
+current browser has. WebGPU synthesis runs directly on the main thread
+instead — it's fast enough that briefly blocking the tab is a fair trade,
+and it sidesteps browsers where a page can get a WebGPU adapter on the main
+thread but not from inside a worker.
 
 ## Voices
 
@@ -146,6 +153,7 @@ What it strips, none of which you want read aloud:
 | Footnote markers | Small glyphs riding above the baseline, digits or `* † ‡ § ¶` |
 | Footnote text | Small print sitting below the last full-size line on its page |
 | Index and contents pages | Pages mostly made of "entry, 12, 45" lines or dot leaders |
+| Unreadable glyphs | Private-use codepoints the file gives no mapping for, once digits have been recovered (see below) |
 
 A title page that sets the title, subtitle and byline in different sizes can
 still come out as several short headings rather than one clean block. Rather
@@ -164,6 +172,29 @@ Some older typesetting maps ligature glyphs onto `ª` and `º`, so "financial"
 arrives as "ªnancial" and a voice reads gibberish. That is repaired, but only
 on the document's own evidence: the glyph has to be used inside words and never
 sit against a digit, so a Spanish or Portuguese ordinal like `1ª` is untouched.
+
+Journal PDFs have two more habits worth naming, because both are silent
+failures — the text looks fine until you notice what is missing.
+
+**Digits in the private use area.** Some typesetters embed a subset font whose
+digit glyphs are named `uniF643`–`uniF64C` and ship no `ToUnicode` map with it.
+There is then nothing to translate them into, so every number in the document —
+dates, page ranges, "Resolution 1325" — arrives as unassigned private-use
+codepoints: invisible on screen, silent in the audio, and invisible to every
+rule above that looks for a digit, which is how a running head with a page
+number stuck to it used to walk straight past the furniture filter. The mapping
+is recovered from the document itself: a digit subset is a block of exactly ten
+consecutive codepoints, and the page numbers then have to decode to a series
+that climbs by one a page. If they don't, nothing is guessed — the glyphs are
+dropped and you are told how many, so you know to look. (A document too short to
+use all ten digits gets no mapping either, for the same reason.)
+
+**Letterspaced small caps.** Running heads and section headings are often set
+`I N T R O D U C T I O N`, and those spaces are really in the PDF's text, not an
+artefact of the geometry — read aloud it is twelve letter names. A line whose
+words are nearly all one letter long is rejoined into words. The judgement is
+made per line rather than per word, because a letterspaced `O N` is
+indistinguishable from an ordinary short word on its own.
 
 Limits worth knowing. **Two-column layouts will come out scrambled**, because
 lines are grouped by vertical position and a two-column page interleaves them.
@@ -185,6 +216,16 @@ Pick a heading level to split on and you get one file per chapter plus a
 combined file for the whole book, each with an inline player and a download
 link. MP3 (128 kbps) keeps an audiobook to a sensible size; WAV is 24 kHz mono
 PCM and runs about 170 MB per hour, so prefer MP3 for anything long.
+
+**Max chunk length** caps how long any single piece handed to the model can
+be, independent of chapter splitting — a chapter (or, with "Don't split," the
+whole book) estimated to run past this many minutes is cut further into
+numbered parts ("Chapter 3 (1/2)", "Chapter 3 (2/2)") so no one synthesis call
+gets large enough to make the worker sit there with no progress for a long
+stretch. Cuts land on a paragraph break wherever one exists; only a single
+paragraph that alone exceeds the limit falls back to a sentence break. Set it
+to 0 to turn the cap off. Defaults to 10 minutes, and — like the other
+settings — it's remembered between visits.
 
 **M4B** produces a single file with real, seekable chapter markers built in —
 the format most audiobook and podcast apps expect — instead of a folder of
@@ -232,8 +273,13 @@ before — straight into the text box, no queue in sight.
 ## Performance
 
 With WebGPU, Kokoro typically runs many times faster than real-time — a
-fraction of a minute of GPU time per minute of audio. On WASM/CPU expect
-roughly real-time on a modern laptop, which still works, just slowly.
+fraction of a minute of GPU time per minute of audio. WebGPU runs directly on
+the main thread precisely because it's this fast: the tab is briefly
+unresponsive while it works, rather than sitting in a background worker,
+which on some browsers can't get a WebGPU adapter even when the main thread
+can. On WASM/CPU expect roughly real-time on a modern laptop — slow enough
+that it runs in a background worker instead, keeping the tab responsive;
+this still works, just slowly.
 
 ## Installing as an app
 

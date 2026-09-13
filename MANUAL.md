@@ -47,6 +47,13 @@ You should see a page headed "ZabAudioBooker" with four numbered sections.
    scrambled, and scanned PDFs are refused with an explanation because they
    contain no text at all.
 
+   Journal PDFs get two extra repairs: letterspaced headings set
+   `I N T R O D U C T I O N` are rejoined into words, and digits hidden in an
+   unmapped private-use font block — which is how some typesetters ship every
+   number in the document — are recovered. If they cannot be recovered with
+   certainty the glyphs are dropped rather than guessed at, and the message
+   under the box tells you how many, so you know to check for missing numbers.
+
    **Dropping several files at once** (or adding one, then dropping another
    later) queues them up as a batch instead of loading straight into the box —
    see [Making several audiobooks at once](#making-several-audiobooks-at-once)
@@ -141,6 +148,7 @@ lists each book's tracks under its own heading, and **Download every file** /
 | **Speed** | `1` is normal. `1.15` is a common audiobook speed. Below `0.8` or above `1.5` starts to sound unnatural. |
 | **Format** | **MP3** for anything long — an hour is about 60 MB. **WAV** is uncompressed and much bigger (about 170 MB per hour), only worth it if you plan to edit the audio. **M4B** is one file with chapters built in, the format most audiobook apps expect — but it's uncompressed too (same size as WAV), and it never makes separate chapter files, only the one combined book. |
 | **Split into chapters at** | Where to cut the book into separate files. `Heading 2 (##)` suits most documents. Choose *Don't split* for one single file. A heading with almost nothing after it — a title page, a bare section divider — is folded into the next real chapter automatically, so you don't end up with a pile of one- or two-second files. |
+| **Max chunk length (min)** | A further cap, independent of the chapter split above: any chapter estimated to run longer than this is cut into numbered parts so no single piece handed to the model gets too large. Generation on a very long chapter can otherwise sit for a long stretch with no visible progress. Default is 10 minutes; set to `0` to turn it off. |
 | **Device** | Leave on **Auto**. It uses your graphics card if your browser offers one, otherwise the processor. |
 | **Precision** | Leave on **Auto**. Lower precision (`q8`) means a smaller download and faster running; higher (`fp32`) means slightly better audio. |
 | **Code blocks** | What to do with code in the document. **Skip silently** is the default. |
@@ -154,8 +162,10 @@ lists each book's tracks under its own heading, and **Download every file** /
 | A red box saying it could not load from the CDN | You are offline, or a firewall is blocking it. The first run needs access to `cdn.jsdelivr.net` and `huggingface.co`. Connect and reload the page. |
 | Nothing happens when you click Generate | Look for the red box. If there is none, open the browser console (see [Reporting problems](TESTING.md#how-to-capture-a-useful-error)) and check for errors. |
 | The page says the download is blocked from your filesystem | Follow the yellow hint on the page: it tells you how to serve the folder locally instead. |
-| It is very slow | Your browser is probably using the processor rather than the graphics card. This is normal and still works — expect roughly real time, so an hour of audio takes about an hour. |
+| It is very slow, or the status line said "WebGPU wasn't usable here" | Your browser couldn't get graphics-card access at all for this page (not even to try), so it's using the processor instead. This happens automatically — nothing to do — and still works, just at roughly real time (an hour of audio takes about an hour) instead of a fraction of that. If your graphics card normally works fine in this browser and generation is still slow, reload the page — this switches devices only once, at the start of a run. |
+| The tab freezes for a bit right as generation starts, then works normally | Expected on a graphics card that works — that part runs directly rather than in the background, since it finishes fast enough that the brief pause is worth it. A tab frozen for more than a few seconds on a short document is not this; see the row above. |
 | The browser tab crashes on a very long book | The audio is held in memory while it is made. Split the document and do a few chapters at a time. |
+| A red box saying the synthesis worker crashed | Click Generate (or Preview) again — it starts a fresh attempt on its own. If it keeps happening, open the browser console (F12) and send the exact text there — that pins down the real cause much faster than guessing. |
 
 ### Serving the folder
 

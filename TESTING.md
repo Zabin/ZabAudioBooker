@@ -44,17 +44,36 @@ Specifically unverified:
   inside a Web Worker rather than the main thread, which is itself unproven:
   the worker's structure and its own copies of the encoders are covered by
   the automated tests, but never with a real model loaded into it.
-- Whether WebGPU is actually used when it should be. The worker now
-  independently re-checks `requestAdapter()` from inside itself before
-  trusting the main thread's guess, and falls back to WASM with a visible
-  log line ("WebGPU wasn't usable here...") if that check or the model load
-  itself fails — this closes a real regression where the main thread's
-  `navigator.gpu` check didn't reflect whether WebGPU actually works inside
-  a worker, and generation could fail (or misreport which device it used)
-  as a result. The branching logic is unit-tested; a real browser where
-  WebGPU works on the main thread but not in a worker has not been used to
-  confirm the fallback triggers on genuine hardware, only that it triggers
-  correctly when no adapter is available at all (true of this sandbox).
+- Whether WebGPU is actually used when it should be. A real report came in
+  of generation getting "exceptionally slow" after synthesis moved into a
+  Web Worker — traced to a genuine split on that machine: `navigator.gpu`
+  worked fine on the main thread, but `requestAdapter()` failed specifically
+  from inside the worker, so every run silently fell back to WASM/CPU with
+  no error at all, just the 10-30x slowdown the report described. Since a
+  worker's WebGPU support can differ from the main thread's in general (not
+  just intermittently on this one machine), fixed by not routing WebGPU
+  through a worker at all: `runGenerateJob()`/the preview handler check
+  `navigator.gpu`/`requestAdapter()` on the main thread themselves and, when
+  it works there, run synthesis right there — the same place it ran before
+  the Worker architecture existed, and fast for the same reason (GPU
+  synthesis is quick enough that briefly blocking the tab is a fair trade;
+  see Performance in README). Only WASM/CPU — slow enough that a responsive
+  tab actually matters — still goes through the worker, where it re-checks
+  `requestAdapter()` for itself and falls back with a visible log line
+  ("WebGPU wasn't usable here...") on the rarer case of a WASM-only machine
+  asking for WebGPU directly. `ensureModel`/`synthSection`/the job-running
+  loop are one set of functions shared verbatim between both places (real
+  functions on the main thread, `Function#toString()`-embedded in the
+  worker), so this isn't two parallel implementations to keep in sync.
+  The routing decision itself is verified in a real headless browser: with
+  a mocked working `navigator.gpu`, generation, preview, and a two-book
+  batch (model loaded once, reused for book two) all complete without a
+  single `Worker` ever being constructed; with no adapter available,
+  behavior is unchanged from before — one worker, falls back to WASM. What
+  isn't tested is genuine hardware exhibiting the main-thread-works/
+  worker-fails split this fix targets — this sandbox has no real GPU at
+  all — only that the routing and fallback logic behave correctly for both
+  extremes (works everywhere / works nowhere) that a real browser can land on.
 - Whether the worker still crashes at all now that its real cause is
   fixed. A report of "worker crashed" turned out to have nothing to do
   with short text (an earlier guess, made before the console output was

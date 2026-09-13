@@ -1961,15 +1961,209 @@ for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.
 }
 
 /* ------------------------------------------------------------------ *
- * Synthesis — runs in a Web Worker so the tab stays responsive during a
- * long WASM/WebGPU run, and so a batch's second and third book reuse the
- * same already-loaded model instead of reloading it per document.
+ * Synthesis. WebGPU runs directly on the main thread: GPU synthesis is
+ * fast enough (see Performance in README) that briefly blocking the tab
+ * is a fair trade, and it sidesteps browsers where a page can get a
+ * WebGPU adapter on the main thread but not from inside a dedicated
+ * Worker — a real, observed split where GPU synthesis silently downgrades
+ * to CPU speed with no error at all, because the *worker's* adapter
+ * request is the one that fails. WASM/CPU, which is slow enough that a
+ * responsive tab actually matters, still runs in a Web Worker, built from
+ * a Blob URL to keep this a single-file app.
  *
- * The worker is built from a Blob URL rather than a second file, to keep
- * this a single-file app. Its pure helpers (encoders, the M4B muxer) are
- * embedded via Function#toString() from the copies defined above, rather
- * than retyped, so there is exactly one source of truth for each.
+ * ensureModel/synthSection/the two job runners below are written once and
+ * used unmodified in both places: called directly, as real functions, on
+ * the main thread; and embedded into the worker's source via
+ * Function#toString() (same as the pure encoders/muxer below) for the
+ * worker. Each takes the mutable bits it needs (the loaded model, an "am
+ * I cancelled" flag, ...) as a `state` object and reports progress and
+ * results through an `emit` callback, rather than through module-scoped
+ * variables or a bare `postMessage` — the one thing that actually differs
+ * between a Worker and the main thread.
  * ------------------------------------------------------------------ */
+
+async function importKokoro() {
+  try {
+    return await import(KOKORO_URL);
+  } catch (e) {
+    throw new Error(
+      "Could not load kokoro-js from the CDN. The first run needs network access to " +
+      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
+    );
+  }
+}
+
+async function loadModel(mod, device, dtype, state, emit) {
+  state.TextSplitterStream = mod.TextSplitterStream;
+  const seen = new Map();
+  return mod.KokoroTTS.from_pretrained(MODEL_ID, {
+    dtype, device,
+    progress_callback: p => {
+      if (!p || !p.file) return;
+      if (p.status === "progress" && p.total) {
+        seen.set(p.file, { loaded: p.loaded, total: p.total });
+        let loaded = 0, total = 0;
+        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
+        emit({ evt: "modelProgress", loaded, total });
+      }
+    },
+  });
+}
+
+// The caller (runGenerateJob / the preview click handler) only ever asks
+// for "webgpu" here after its own navigator.gpu/requestAdapter() check on
+// whichever context is about to run this already passed — for the main
+// thread, or, for the worker's own copy of this same function, re-checked
+// from inside the worker, since a worker's WebGPU support is not always
+// the same as the main thread's. Either way this still re-verifies and
+// falls back to WASM rather than failing outright if that turns out to
+// have been optimistic (an adapter that exists but can't actually stand
+// up a session, e.g. a buffer-size limit).
+async function ensureModel(device, dtype, state, emit) {
+  if (device === "webgpu") {
+    let usable = false;
+    try { usable = !!(self.navigator.gpu && await self.navigator.gpu.requestAdapter()); }
+    catch { usable = false; }
+    if (!usable) {
+      emit({ evt: "deviceFallback", requested: device, actual: "wasm",
+        reason: "no WebGPU adapter is available" });
+      device = "wasm"; dtype = "q8";
+    }
+  }
+
+  const key = device + "|" + dtype;
+  if (state.tts && state.ttsKey === key) { state.resolvedDevice = device; return state.tts; }
+  if (state.tts) {
+    try { state.tts.model?.dispose?.(); } catch {}
+    state.tts = null; state.ttsKey = "";
+  }
+
+  const mod = await importKokoro();
+  try {
+    state.tts = await loadModel(mod, device, dtype, state, emit);
+  } catch (e) {
+    // The adapter existed but onnxruntime's WebGPU backend still failed to
+    // actually stand up a session — fall back once rather than fail the run.
+    if (device !== "webgpu") throw e;
+    emit({ evt: "deviceFallback", requested: device, actual: "wasm", reason: e.message || String(e) });
+    device = "wasm"; dtype = "q8";
+    state.tts = await loadModel(mod, device, dtype, state, emit);
+  }
+  state.ttsKey = device + "|" + dtype;
+  state.resolvedDevice = device;
+
+  let voices = [];
+  try {
+    const list = state.tts.list_voices?.();
+    voices = Array.isArray(list) ? list : Object.keys(list || {});
+  } catch {}
+  emit({ evt: "modelReady", voices, device, dtype });
+  return state.tts;
+}
+
+async function synthSection(text, voice, speed, onChunk, state) {
+  const splitter = new state.TextSplitterStream();
+  const stream = state.tts.stream(splitter, { voice, speed });
+  const chunks = [];
+  const consume = (async () => {
+    for await (const item of stream) {
+      if (state.cancelled) break;
+      const data = item.audio?.audio ?? item.audio;
+      if (data?.length) { chunks.push(data); onChunk(data.length); }
+    }
+  })();
+  splitter.push(text);
+  splitter.close();
+  await consume;
+  return concatFloat32(chunks);
+}
+
+async function encodeFormat(fmt, float32, chapters, title) {
+  if (fmt === "mp3") return encodeMp3(float32);
+  if (fmt === "m4b") return encodeM4b(float32, chapters, title);
+  return encodeWav(float32);
+}
+
+async function runPreviewInline(msg, state, emit) {
+  try {
+    state.cancelled = false;
+    await ensureModel(msg.device, msg.dtype, state, emit);
+    const audio = await synthSection(msg.text, msg.voice, msg.speed, () => {}, state);
+    const buf = await (await encodeWav(audio)).arrayBuffer();
+    emit({ evt: "previewDone", buf }, [buf]);
+  } catch (err) {
+    emit({ evt: "error", message: err.message || String(err) });
+  }
+}
+
+async function runGenerateInline(jobId, sections, settings, state, emit) {
+  const { voice, speed, format, device, dtype, docTitle } = settings;
+  state.cancelled = false;
+  try {
+    await ensureModel(device, dtype, state, emit);
+    const t0 = Date.now();
+    let doneChars = 0, totalSamples = 0;
+    const totalChars = sections.reduce((n, s) => n + s.text.length, 0) || 1;
+    const all = [];
+    const chapters = [];
+
+    for (let i = 0; i < sections.length; i++) {
+      if (state.cancelled) break;
+      const s = sections[i];
+      const label = s.title || (sections.length > 1 ? "Part " + (i + 1) : "Audiobook");
+      chapters.push({ title: label, startSample: totalSamples });
+
+      const audio = await synthSection(s.text, voice, speed, added => {
+        totalSamples += added;
+        const secs = totalSamples / SAMPLE_RATE;
+        const elapsed = (Date.now() - t0) / 1000;
+        emit({
+          evt: "sectionProgress", jobId, index: i, count: sections.length, label,
+          frac: (doneChars + s.text.length * 0.5) / totalChars,
+          secs, elapsed, rtf: elapsed / Math.max(secs, 0.001),
+        });
+      }, state);
+
+      doneChars += s.text.length;
+      emit({ evt: "sectionProgress", jobId, index: i, count: sections.length, label, frac: doneChars / totalChars });
+      if (state.cancelled) break;
+      if (!audio.length) continue;
+      all.push(audio);
+
+      if (sections.length > 1 && format !== "m4b") {
+        const n = String(i + 1).padStart(2, "0");
+        const blob = await encodeFormat(format, audio);
+        const buf = await blob.arrayBuffer();
+        emit({ evt: "sectionDone", jobId, index: i, label, n, buf, mime: blob.type, seconds: audio.length / SAMPLE_RATE }, [buf]);
+      }
+    }
+
+    if (state.cancelled) { emit({ jobId, evt: "cancelled" }); return; }
+    if (!all.length) { emit({ jobId, evt: "error", message: "No audio was produced." }); return; }
+
+    emit({ jobId, evt: "encoding" });
+    const full = concatFloat32(all);
+    const blob = await encodeFormat(format, full, chapters, docTitle);
+    const buf = await blob.arrayBuffer();
+    const elapsed = (Date.now() - t0) / 1000;
+    const secs = full.length / SAMPLE_RATE;
+    emit({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
+    emit({ jobId, evt: "done", elapsed, secs, device: state.resolvedDevice });
+  } catch (err) {
+    emit({ jobId, evt: "error", message: err.message || String(err) });
+  }
+}
+
+// State for synthesis that runs right here on the main thread (WebGPU
+// jobs) — kept separate from the worker's own copy of the same shape, so
+// a cached WebGPU model here and a cached WASM model in the worker can
+// coexist if the user switches Device back and forth.
+const mainThreadState = { tts: null, ttsKey: "", TextSplitterStream: null, cancelled: false, resolvedDevice: null };
+
+async function webgpuUsableHere() {
+  try { return !!(navigator.gpu && await navigator.gpu.requestAdapter()); }
+  catch { return false; }
+}
 
 const WORKER_SRC = `
 "use strict";
@@ -1997,182 +2191,26 @@ const MP4_MOVIE_TIMESCALE = ${MP4_MOVIE_TIMESCALE};
 const buildM4bBytes = ${buildM4bBytes.toString()};
 const encodeM4b = ${encodeM4b.toString()};
 
-let tts = null, ttsKey = "", TextSplitterStream = null, cancelled = false;
-let resolvedDevice = null; // what actually ended up running, which can differ from what was requested
+const importKokoro = ${importKokoro.toString()};
+const loadModel = ${loadModel.toString()};
+const ensureModel = ${ensureModel.toString()};
+const synthSection = ${synthSection.toString()};
+const encodeFormat = ${encodeFormat.toString()};
+const runPreviewInline = ${runPreviewInline.toString()};
+const runGenerateInline = ${runGenerateInline.toString()};
 
-async function importKokoro() {
-  try {
-    return await import(KOKORO_URL);
-  } catch (e) {
-    throw new Error(
-      "Could not load kokoro-js from the CDN. The first run needs network access to " +
-      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
-    );
-  }
-}
-
-async function loadModel(mod, device, dtype) {
-  TextSplitterStream = mod.TextSplitterStream;
-  const seen = new Map();
-  return mod.KokoroTTS.from_pretrained(MODEL_ID, {
-    dtype, device,
-    progress_callback: p => {
-      if (!p || !p.file) return;
-      if (p.status === "progress" && p.total) {
-        seen.set(p.file, { loaded: p.loaded, total: p.total });
-        let loaded = 0, total = 0;
-        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
-        postMessage({ evt: "modelProgress", loaded, total });
-      }
-    },
-  });
-}
-
-// The main thread's "auto" device pick only checks navigator.gpu on the
-// MAIN thread, as a cheap hint before ever spinning up this worker — it
-// can't know whether WebGPU actually works from *inside* a worker, which
-// is less consistent across browsers than on the main thread. So this is
-// the one place that actually matters, and it always re-verifies for
-// itself rather than trusting that hint, falling back to WASM rather than
-// failing outright when WebGPU turns out not to work here after all.
-async function ensureModel(device, dtype) {
-  if (device === "webgpu") {
-    let usable = false;
-    try { usable = !!(self.navigator.gpu && await self.navigator.gpu.requestAdapter()); }
-    catch { usable = false; }
-    if (!usable) {
-      postMessage({ evt: "deviceFallback", requested: device, actual: "wasm",
-        reason: "WebGPU is not available from inside this browser's worker." });
-      device = "wasm"; dtype = "q8";
-    }
-  }
-
-  const key = device + "|" + dtype;
-  if (tts && ttsKey === key) { resolvedDevice = device; return tts; }
-  if (tts) {
-    try { tts.model?.dispose?.(); } catch {}
-    tts = null; ttsKey = "";
-  }
-
-  const mod = await importKokoro();
-  try {
-    tts = await loadModel(mod, device, dtype);
-  } catch (e) {
-    // The adapter existed but onnxruntime's WebGPU backend still failed to
-    // actually stand up a session — fall back once rather than fail the run.
-    if (device !== "webgpu") throw e;
-    postMessage({ evt: "deviceFallback", requested: device, actual: "wasm", reason: e.message || String(e) });
-    device = "wasm"; dtype = "q8";
-    tts = await loadModel(mod, device, dtype);
-  }
-  ttsKey = device + "|" + dtype;
-  resolvedDevice = device;
-
-  let voices = [];
-  try {
-    const list = tts.list_voices?.();
-    voices = Array.isArray(list) ? list : Object.keys(list || {});
-  } catch {}
-  postMessage({ evt: "modelReady", voices, device, dtype });
-  return tts;
-}
-
-async function synthSection(text, voice, speed, onChunk) {
-  const splitter = new TextSplitterStream();
-  const stream = tts.stream(splitter, { voice, speed });
-  const chunks = [];
-  const consume = (async () => {
-    for await (const item of stream) {
-      if (cancelled) break;
-      const data = item.audio?.audio ?? item.audio;
-      if (data?.length) { chunks.push(data); onChunk(data.length); }
-    }
-  })();
-  splitter.push(text);
-  splitter.close();
-  await consume;
-  return concatFloat32(chunks);
-}
-
-async function encodeFormat(fmt, float32, chapters, title) {
-  if (fmt === "mp3") return encodeMp3(float32);
-  if (fmt === "m4b") return encodeM4b(float32, chapters, title);
-  return encodeWav(float32);
-}
+// This worker only ever runs the WASM/CPU path — see the comment above
+// runGenerateJob() on the main thread for why WebGPU jobs never reach here.
+const workerState = { tts: null, ttsKey: "", TextSplitterStream: null, cancelled: false, resolvedDevice: null };
+const emit = (msg, transfer) => postMessage(msg, transfer);
 
 self.onmessage = async (e) => {
   const msg = e.data;
-  if (msg.cmd === "cancel") { cancelled = true; return; }
-
-  if (msg.cmd === "preview") {
-    try {
-      cancelled = false;
-      await ensureModel(msg.device, msg.dtype);
-      const audio = await synthSection(msg.text, msg.voice, msg.speed, () => {});
-      const buf = await (await encodeWav(audio)).arrayBuffer();
-      postMessage({ evt: "previewDone", buf }, [buf]);
-    } catch (err) {
-      postMessage({ evt: "error", message: err.message || String(err) });
-    }
-    return;
-  }
-
+  if (msg.cmd === "cancel") { workerState.cancelled = true; return; }
+  if (msg.cmd === "preview") { await runPreviewInline(msg, workerState, emit); return; }
   if (msg.cmd === "generate") {
-    const { jobId, sections, voice, speed, format, device, dtype, docTitle } = msg;
-    cancelled = false;
-    try {
-      await ensureModel(device, dtype);
-      const t0 = Date.now();
-      let doneChars = 0, totalSamples = 0;
-      const totalChars = sections.reduce((n, s) => n + s.text.length, 0) || 1;
-      const all = [];
-      const chapters = [];
-
-      for (let i = 0; i < sections.length; i++) {
-        if (cancelled) break;
-        const s = sections[i];
-        const label = s.title || (sections.length > 1 ? "Part " + (i + 1) : "Audiobook");
-        chapters.push({ title: label, startSample: totalSamples });
-
-        const audio = await synthSection(s.text, voice, speed, added => {
-          totalSamples += added;
-          const secs = totalSamples / SAMPLE_RATE;
-          const elapsed = (Date.now() - t0) / 1000;
-          postMessage({
-            evt: "sectionProgress", jobId, index: i, count: sections.length, label,
-            frac: (doneChars + s.text.length * 0.5) / totalChars,
-            secs, elapsed, rtf: elapsed / Math.max(secs, 0.001),
-          });
-        });
-
-        doneChars += s.text.length;
-        postMessage({ evt: "sectionProgress", jobId, index: i, count: sections.length, label, frac: doneChars / totalChars });
-        if (cancelled) break;
-        if (!audio.length) continue;
-        all.push(audio);
-
-        if (sections.length > 1 && format !== "m4b") {
-          const n = String(i + 1).padStart(2, "0");
-          const blob = await encodeFormat(format, audio);
-          const buf = await blob.arrayBuffer();
-          postMessage({ evt: "sectionDone", jobId, index: i, label, n, buf, mime: blob.type, seconds: audio.length / SAMPLE_RATE }, [buf]);
-        }
-      }
-
-      if (cancelled) { postMessage({ jobId, evt: "cancelled" }); return; }
-      if (!all.length) { postMessage({ jobId, evt: "error", message: "No audio was produced." }); return; }
-
-      postMessage({ jobId, evt: "encoding" });
-      const full = concatFloat32(all);
-      const blob = await encodeFormat(format, full, chapters, docTitle);
-      const buf = await blob.arrayBuffer();
-      const elapsed = (Date.now() - t0) / 1000;
-      const secs = full.length / SAMPLE_RATE;
-      postMessage({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
-      postMessage({ jobId, evt: "done", elapsed, secs, device: resolvedDevice });
-    } catch (err) {
-      postMessage({ jobId, evt: "error", message: err.message || String(err) });
-    }
+    const { jobId, sections, ...settings } = msg;
+    await runGenerateInline(jobId, sections, settings, workerState, emit);
   }
 };
 `;
@@ -2189,7 +2227,7 @@ function getWorker() {
   // the app entirely for anyone using it the way MANUAL.md tells them to:
   // double-click the file. Classic workers have no such restriction.
   worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })));
-  worker.onmessage = e => onWorkerMessage(e.data);
+  worker.onmessage = e => onSynthesisEvent(e.data);
   worker.onerror = e => {
     console.error(e);
     // A worker that threw an uncaught error once does not reliably keep
@@ -2256,8 +2294,9 @@ function addTrack(name, filename, blob, seconds, { first = false, zipName = file
   els.results.classList.remove("hidden");
 }
 
-// One in-flight worker job at a time; batches run their books sequentially
-// through this same worker, so a cached model carries over between them.
+// One in-flight job at a time; batches run their books sequentially through
+// the same place (worker or here on the main thread, per device), so a
+// cached model carries over between them.
 let cancelled = false;
 let jobSeq = 0;
 let activeJob = null; // { jobId, resolve, reject, bookLabel, bookIndex, bookCount, flatPrefix, zipPrefix, docTitle, ext }
@@ -2270,7 +2309,7 @@ function resetPreviewButton() {
   els.previewVoice.textContent = "▶ Preview";
 }
 
-function onWorkerMessage(msg) {
+function onSynthesisEvent(msg) {
   if (msg.evt === "modelProgress") {
     progress(msg.loaded / msg.total);
     log(`Loading Kokoro-82M — ${(msg.loaded / 1048576).toFixed(1)} MB of ${(msg.total / 1048576).toFixed(1)} MB`);
@@ -2340,39 +2379,49 @@ function onWorkerMessage(msg) {
 }
 
 // Resolves once this book's job finishes (or is cancelled); UI updates for
-// its events happen as a side effect of onWorkerMessage above.
-function runGenerateJob(sections, settings, bookMeta) {
+// its events happen as a side effect of onSynthesisEvent above, whether the
+// job actually ran in the worker or, for WebGPU, right here (see below).
+async function runGenerateJob(sections, settings, bookMeta) {
+  const jobId = ++jobSeq;
+  // WebGPU runs on the main thread rather than in the worker whenever it
+  // can — see the comment above the "Synthesis" section for why — so this
+  // has to know before dispatching, not after: ensureModel()'s own check
+  // happens too late to decide *where* to run, only what to do once running
+  // somewhere. WASM never reaches this branch; it always goes to the worker.
+  const useMainThread = settings.device === "webgpu" && await webgpuUsableHere();
   return new Promise((resolve, reject) => {
-    const jobId = ++jobSeq;
     activeJob = {
       jobId, resolve, reject,
       bookLabel: bookMeta.bookLabel, bookIndex: bookMeta.bookIndex, bookCount: bookMeta.bookCount,
       flatPrefix: bookMeta.flatPrefix, zipPrefix: bookMeta.zipPrefix,
       docTitle: settings.docTitle, ext: settings.format,
     };
-    getWorker().postMessage({ cmd: "generate", jobId, sections, ...settings });
+    if (useMainThread) runGenerateInline(jobId, sections, settings, mainThreadState, onSynthesisEvent);
+    else getWorker().postMessage({ cmd: "generate", jobId, sections, ...settings });
   });
 }
 
-els.previewVoice.addEventListener("click", () => {
-  if (activeJob || previewInFlight) return; // the worker is busy; wait rather than interleave with it
+els.previewVoice.addEventListener("click", async () => {
+  if (activeJob || previewInFlight) return; // one job at a time; wait rather than interleave with it
   els.fatal.classList.add("hidden");
   const sample = "This is what your audiobook will sound like.";
   previewInFlight = true;
   els.previewVoice.disabled = true;
   els.previewVoice.textContent = "Loading…";
   const device = pickDevice();
-  getWorker().postMessage({
-    cmd: "preview", text: sample, voice: els.voice.value, speed: +els.speed.value || 1,
-    device, dtype: pickDtype(device),
-  });
+  const dtype = pickDtype(device);
+  if (device === "webgpu" && await webgpuUsableHere()) {
+    runPreviewInline({ text: sample, voice: els.voice.value, speed: +els.speed.value || 1, device, dtype }, mainThreadState, onSynthesisEvent);
+  } else {
+    getWorker().postMessage({ cmd: "preview", text: sample, voice: els.voice.value, speed: +els.speed.value || 1, device, dtype });
+  }
 });
 
 async function generate() {
   cancelled = false;
   els.fatal.classList.add("hidden");
   els.go.disabled = true;
-  els.previewVoice.disabled = true; // one job at a time on the shared worker
+  els.previewVoice.disabled = true; // one job at a time, worker or main thread
   els.cancel.classList.remove("hidden");
   els.results.classList.add("hidden");
   els.tracks.innerHTML = "";
@@ -2400,7 +2449,7 @@ async function generate() {
   const device = pickDevice();
   const dtype = pickDtype(device);
   const t0 = performance.now();
-  let lastDevice = device; // updated below from what the worker actually used, which can differ (see deviceFallback)
+  let lastDevice = device; // updated below from what actually ran, which can differ (see deviceFallback)
 
   try {
     for (let bi = 0; bi < books.length; bi++) {
@@ -2456,6 +2505,7 @@ async function generate() {
 els.go.addEventListener("click", generate);
 els.cancel.addEventListener("click", () => {
   cancelled = true;
+  mainThreadState.cancelled = true; // in case the active/last job ran here rather than in the worker
   if (worker) worker.postMessage({ cmd: "cancel" });
   log("Cancelling…");
 });

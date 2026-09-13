@@ -13,7 +13,9 @@ None of them are needed to just open and use the page.)
 
 New to any of this? **[MANUAL.md](MANUAL.md)** walks through it step by step.
 **[TESTING.md](TESTING.md)** is a checklist for trying it out and reporting
-what breaks.
+what breaks — or run **[selftest.html](selftest.html)** for a one-click
+automated smoke test of the same app that only pauses to ask you something
+when it genuinely needs a human ear or a real player.
 
 ## Features
 
@@ -254,6 +256,7 @@ network fetch to open.
 ```
 .
 ├── zabaudiobooker.html       # the whole app: Markdown/EPUB/PDF -> audiobook
+├── selftest.html             # one-click automated smoke test of the app above
 ├── zabaudiobooker.webmanifest # app metadata, for "install as an app"
 ├── sw.js                     # service worker: caches the app shell offline
 ├── icon.svg                  # app icon

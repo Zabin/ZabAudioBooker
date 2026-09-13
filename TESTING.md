@@ -6,6 +6,18 @@ a template for reporting what you find.
 Everything here refers to `zabaudiobooker.html`. See
 [MANUAL.md](MANUAL.md) if you have not opened it yet.
 
+**Start with [selftest.html](selftest.html).** Open it (served, not `file://`
+— see [MANUAL.md](MANUAL.md#serving-the-folder)) and click **▶ Run
+self-test**. It drives the real app end to end and checks everything a
+machine can check on its own — the Markdown/EPUB/PDF pipelines, the WAV/M4B/
+zip encoders, settings persistence, and a real generated audiobook — and
+only stops to ask you something when the answer genuinely needs a human ear
+or a real player, explaining why at each step. It finishes with a copyable
+report. It is a fast smoke test, not a replacement for the walkthrough
+below — run it first to catch anything obviously broken, then work through
+this checklist for the things only a human doing the whole workflow can
+judge.
+
 ---
 
 ## Why this needs your testing

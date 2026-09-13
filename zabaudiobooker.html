@@ -2172,7 +2172,7 @@ const encodeM4b = ${encodeM4b.toString()};
 
 let tts = null, ttsKey = "", TextSplitterStream = null, cancelled = false;
 
-async function ensureModel(device, dtype) {
+async function ensureModel(device, dtype, isFallback) {
   const key = device + "|" + dtype;
   if (tts && ttsKey === key) return tts;
   if (tts) {
@@ -2190,18 +2190,36 @@ async function ensureModel(device, dtype) {
   }
   TextSplitterStream = mod.TextSplitterStream;
   const seen = new Map();
-  tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
-    dtype, device,
-    progress_callback: p => {
-      if (!p || !p.file) return;
-      if (p.status === "progress" && p.total) {
-        seen.set(p.file, { loaded: p.loaded, total: p.total });
-        let loaded = 0, total = 0;
-        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
-        postMessage({ evt: "modelProgress", loaded, total });
-      }
-    },
-  });
+  try {
+    tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
+      dtype, device,
+      progress_callback: p => {
+        if (!p || !p.file) return;
+        if (p.status === "progress" && p.total) {
+          seen.set(p.file, { loaded: p.loaded, total: p.total });
+          let loaded = 0, total = 0;
+          for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
+          postMessage({ evt: "modelProgress", loaded, total });
+        }
+      },
+    });
+  } catch (e) {
+    // WebGPU limits (max buffer size, mappedAtCreation sub-limits, etc.) vary
+    // wildly across GPUs and drivers, and there is no way to query them in
+    // advance that covers every failure mode — so the only reliable test is
+    // trying to load the model and seeing whether this adapter can actually
+    // do it. wasm+q8 is the well-trodden path that works everywhere, so fall
+    // back to it once rather than leaving the book stuck on a dead device.
+    if (device === "webgpu" && !isFallback) {
+      postMessage({
+        evt: "deviceFallback",
+        message: "WebGPU couldn't load the voice model on this graphics hardware " +
+          "(" + (e.message || e) + "); switching to WASM (CPU) instead.",
+      });
+      return ensureModel("wasm", "q8", true);
+    }
+    throw new Error("Could not load the voice model: " + (e.message || e));
+  }
   ttsKey = key;
   let voices = [];
   try {
@@ -2260,6 +2278,9 @@ self.onmessage = async (e) => {
     cancelled = false;
     try {
       await ensureModel(device, dtype);
+      // ensureModel may have fallen back to a different device/precision than
+      // the ones requested (see deviceFallback above); report what actually ran.
+      const [actualDevice, actualDtype] = ttsKey ? ttsKey.split("|") : [device, dtype];
       const t0 = Date.now();
       let doneChars = 0, totalSamples = 0;
       const totalChars = sections.reduce((n, s) => n + s.text.length, 0) || 1;
@@ -2307,7 +2328,7 @@ self.onmessage = async (e) => {
       const elapsed = (Date.now() - t0) / 1000;
       const secs = full.length / SAMPLE_RATE;
       postMessage({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
-      postMessage({ jobId, evt: "done", elapsed, secs, device });
+      postMessage({ jobId, evt: "done", elapsed, secs, device: actualDevice, dtype: actualDtype });
     } catch (err) {
       postMessage({ jobId, evt: "error", message: err.message || String(err) });
     }
@@ -2396,6 +2417,16 @@ function onWorkerMessage(msg) {
     if (msg.voices?.length) fillVoices([["Voices", msg.voices.map(id => [id, id])]], pendingVoice || els.voice.value);
     pendingVoice = null;
     progress(null);
+    return;
+  }
+  if (msg.evt === "deviceFallback") {
+    log(msg.message);
+    // The hardware has now demonstrated it can't do this, so stop asking it
+    // to try again on every click — but only override Precision if the user
+    // never chose one themselves.
+    els.device.value = "wasm";
+    if (els.dtype.value === "auto") els.dtype.value = "q8";
+    saveSettings();
     return;
   }
   if (msg.evt === "previewDone") {
@@ -2502,8 +2533,12 @@ async function generate() {
   const voice = els.voice.value;
   const speed = +els.speed.value || 1;
   const fmt = els.format.value;
-  const device = pickDevice();
-  const dtype = pickDtype(device);
+  // Not const: a device that rejects the model (see deviceFallback in the
+  // worker) is swapped out after the first book finishes, so a batch's
+  // remaining books go straight to the working device instead of repeating
+  // the same failed load and fallback on every single one.
+  let device = pickDevice();
+  let dtype = pickDtype(device);
   const t0 = performance.now();
 
   try {
@@ -2526,12 +2561,13 @@ async function generate() {
       }
 
       const bookSlug = slugify(bookTitle, "book-" + (bi + 1));
-      await runGenerateJob(sections, { voice, speed, format: fmt, device, dtype, docTitle: bookTitle }, {
+      const result = await runGenerateJob(sections, { voice, speed, format: fmt, device, dtype, docTitle: bookTitle }, {
         bookLabel: books.length > 1 ? `Book ${bi + 1}/${books.length} — ` : "",
         bookIndex: bi, bookCount: books.length,
         flatPrefix: books.length > 1 ? `${bookSlug}-` : "",
         zipPrefix: books.length > 1 ? `${bookSlug}/` : "",
       });
+      if (result?.device) { device = result.device; dtype = result.dtype || dtype; }
       if (cancelled) break;
     }
 

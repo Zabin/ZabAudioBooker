@@ -51,8 +51,56 @@ Specifically unverified:
   inside a Web Worker rather than the main thread, which is itself unproven:
   the worker's structure and its own copies of the encoders are covered by
   the automated tests, but never with a real model loaded into it.
-- Whether WebGPU is detected and used, including inside a Worker — some
-  browsers support WebGPU on the main thread but not (yet) in a worker.
+- Whether WebGPU is actually used when it should be. A real report came in
+  of generation getting "exceptionally slow" after synthesis moved into a
+  Web Worker — traced to a genuine split on that machine: `navigator.gpu`
+  worked fine on the main thread, but `requestAdapter()` failed specifically
+  from inside the worker, so every run silently fell back to WASM/CPU with
+  no error at all, just the 10-30x slowdown the report described. Since a
+  worker's WebGPU support can differ from the main thread's in general (not
+  just intermittently on this one machine), fixed by not routing WebGPU
+  through a worker at all: `runGenerateJob()`/the preview handler check
+  `navigator.gpu`/`requestAdapter()` on the main thread themselves and, when
+  it works there, run synthesis right there — the same place it ran before
+  the Worker architecture existed, and fast for the same reason (GPU
+  synthesis is quick enough that briefly blocking the tab is a fair trade;
+  see Performance in README). Only WASM/CPU — slow enough that a responsive
+  tab actually matters — still goes through the worker, where it re-checks
+  `requestAdapter()` for itself and falls back with a visible log line
+  ("WebGPU wasn't usable here...") on the rarer case of a WASM-only machine
+  asking for WebGPU directly. `ensureModel`/`synthSection`/the job-running
+  loop are one set of functions shared verbatim between both places (real
+  functions on the main thread, `Function#toString()`-embedded in the
+  worker), so this isn't two parallel implementations to keep in sync.
+  The routing decision itself is verified in a real headless browser: with
+  a mocked working `navigator.gpu`, generation, preview, and a two-book
+  batch (model loaded once, reused for book two) all complete without a
+  single `Worker` ever being constructed; with no adapter available,
+  behavior is unchanged from before — one worker, falls back to WASM. What
+  isn't tested is genuine hardware exhibiting the main-thread-works/
+  worker-fails split this fix targets — this sandbox has no real GPU at
+  all — only that the routing and fallback logic behave correctly for both
+  extremes (works everywhere / works nowhere) that a real browser can land on.
+- Whether the worker still crashes at all now that its real cause is
+  fixed. A report of "worker crashed" turned out to have nothing to do
+  with short text (an earlier guess, made before the console output was
+  available) — it was Chrome flatly refusing to create a *module* worker
+  from a blob: URL when the page itself is opened via `file://`
+  ("Refused to cross-origin redirects of the top-level worker script"),
+  which broke generation and preview for anyone using the app the way
+  MANUAL.md tells them to: double-click the file. Fixed by using a
+  classic worker instead (the source never used static import/export
+  anyway, only dynamic import(), which works the same in either kind).
+  Confirmed directly: the exact same scenario that crashed before —
+  generate() over `file://` — now completes with zero console errors.
+  While investigating, two more bugs turned up in the surrounding error
+  handling and were fixed too: a crashed worker silently stayed dead for
+  every later attempt, and a preview failure of any kind (not just a
+  crash) left the Preview button stuck on "Loading…" forever with no
+  message at all. All three fixes are unit- and browser-tested; what
+  isn't tested is a real, unmocked model actually running to completion
+  under `file://`, which needs real network access this sandbox doesn't
+  have.
 - Whether MP3 encoding works — that library is loaded on demand and has never
   been loaded.
 - Whether an M4B file actually plays, and shows chapters, in real audiobook

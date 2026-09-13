@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZabAudioBooker — Markdown to Audiobook</title>
-<link rel="manifest" href="zabaudiobooker.webmanifest">
 <meta name="theme-color" content="#2f6f4f">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
@@ -2189,22 +2188,227 @@ for (const el of [els.md, els.split, els.maxChunk, els.code, els.tables, els.num
 }
 
 /* ------------------------------------------------------------------ *
- * Synthesis — runs in a Web Worker so the tab stays responsive during a
- * long WASM/WebGPU run, and so a batch's second and third book reuse the
- * same already-loaded model instead of reloading it per document.
+ * Synthesis. WebGPU runs directly on the main thread: GPU synthesis is
+ * fast enough (see Performance in README) that briefly blocking the tab
+ * is a fair trade, and it sidesteps browsers where a page can get a
+ * WebGPU adapter on the main thread but not from inside a dedicated
+ * Worker — a real, observed split where GPU synthesis silently downgrades
+ * to CPU speed with no error at all, because the *worker's* adapter
+ * request is the one that fails. WASM/CPU, which is slow enough that a
+ * responsive tab actually matters, still runs in a Web Worker, built from
+ * a Blob URL to keep this a single-file app.
  *
- * The worker is built from a Blob URL rather than a second file, to keep
- * this a single-file app. Its pure helpers (encoders, the M4B muxer) are
- * embedded via Function#toString() from the copies defined above, rather
- * than retyped, so there is exactly one source of truth for each.
+ * ensureModel/synthSection/the two job runners below are written once and
+ * used unmodified in both places: called directly, as real functions, on
+ * the main thread; and embedded into the worker's source via
+ * Function#toString() (same as the pure encoders/muxer below) for the
+ * worker. Each takes the mutable bits it needs (the loaded model, an "am
+ * I cancelled" flag, ...) as a `state` object and reports progress and
+ * results through an `emit` callback, rather than through module-scoped
+ * variables or a bare `postMessage` — the one thing that actually differs
+ * between a Worker and the main thread.
  *
- * Deliberately a classic worker, not `{ type: "module" }`: it only ever
- * uses dynamic import() to reach kokoro-js, never a static import, so it
- * does not need module semantics — and a module worker loaded from a
- * blob: URL fails to start at all when the page's own origin is null,
- * which is exactly what file:// is. A classic worker from the same blob:
- * URL has no such restriction, so opening this file directly still works.
+ * The worker itself is built from a Blob URL rather than a second file, to
+ * keep this a single-file app. It is deliberately a classic worker, not
+ * `{ type: "module" }`: it only ever uses dynamic import() to reach
+ * kokoro-js, never a static import, so it does not need module semantics —
+ * and a module worker loaded from a blob: URL fails to start at all when
+ * the page's own origin is null, which is exactly what file:// is. A
+ * classic worker from the same blob: URL has no such restriction, so
+ * opening this file directly still works.
  * ------------------------------------------------------------------ */
+
+async function importKokoro() {
+  try {
+    return await import(KOKORO_URL);
+  } catch (e) {
+    throw new Error(
+      "Could not load kokoro-js from the CDN. The first run needs network access to " +
+      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
+    );
+  }
+}
+
+async function loadModel(mod, device, dtype, state, emit) {
+  state.TextSplitterStream = mod.TextSplitterStream;
+  const seen = new Map();
+  return mod.KokoroTTS.from_pretrained(MODEL_ID, {
+    dtype, device,
+    progress_callback: p => {
+      if (!p || !p.file) return;
+      if (p.status === "progress" && p.total) {
+        seen.set(p.file, { loaded: p.loaded, total: p.total });
+        let loaded = 0, total = 0;
+        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
+        emit({ evt: "modelProgress", loaded, total });
+      }
+    },
+  });
+}
+
+// The caller (runGenerateJob / the preview click handler) only ever asks
+// for "webgpu" here after its own navigator.gpu/requestAdapter() check on
+// whichever context is about to run this already passed — for the main
+// thread, or, for the worker's own copy of this same function, re-checked
+// from inside the worker, since a worker's WebGPU support is not always
+// the same as the main thread's. Either way this still re-verifies and
+// falls back to WASM rather than failing outright if that turns out to
+// have been optimistic (an adapter that exists but can't actually stand
+// up a session, e.g. a buffer-size limit).
+async function ensureModel(device, dtype, state, emit) {
+  if (device === "webgpu") {
+    let usable = false;
+    try { usable = !!(self.navigator.gpu && await self.navigator.gpu.requestAdapter()); }
+    catch { usable = false; }
+    if (!usable) {
+      emit({ evt: "deviceFallback", requested: device, actual: "wasm",
+        reason: "no WebGPU adapter is available" });
+      device = "wasm"; dtype = "q8";
+    }
+  }
+
+  const key = device + "|" + dtype;
+  if (state.tts && state.ttsKey === key) { state.resolvedDevice = device; return state.tts; }
+  if (state.tts) {
+    try { state.tts.model?.dispose?.(); } catch {}
+    state.tts = null; state.ttsKey = "";
+  }
+
+  const mod = await importKokoro();
+  try {
+    state.tts = await loadModel(mod, device, dtype, state, emit);
+  } catch (e) {
+    // The adapter existed but onnxruntime's WebGPU backend still failed to
+    // actually stand up a session — fall back once rather than fail the run.
+    if (device !== "webgpu") throw e;
+    emit({ evt: "deviceFallback", requested: device, actual: "wasm", reason: e.message || String(e) });
+    device = "wasm"; dtype = "q8";
+    state.tts = await loadModel(mod, device, dtype, state, emit);
+  }
+  state.ttsKey = device + "|" + dtype;
+  state.resolvedDevice = device;
+
+  let voices = [];
+  try {
+    const list = state.tts.list_voices?.();
+    voices = Array.isArray(list) ? list : Object.keys(list || {});
+  } catch {}
+  emit({ evt: "modelReady", voices, device, dtype });
+  return state.tts;
+}
+
+async function synthSection(text, voice, speed, onChunk, state) {
+  const splitter = new state.TextSplitterStream();
+  const stream = state.tts.stream(splitter, { voice, speed });
+  const chunks = [];
+  const consume = (async () => {
+    for await (const item of stream) {
+      if (state.cancelled) break;
+      const data = item.audio?.audio ?? item.audio;
+      if (data?.length) { chunks.push(data); onChunk(data.length); }
+    }
+  })();
+  splitter.push(text);
+  splitter.close();
+  await consume;
+  return concatFloat32(chunks);
+}
+
+async function encodeFormat(fmt, float32, chapters, title) {
+  if (fmt === "mp3") return encodeMp3(float32);
+  if (fmt === "m4b") return encodeM4b(float32, chapters, title);
+  return encodeWav(float32);
+}
+
+async function runPreviewInline(msg, state, emit) {
+  try {
+    state.cancelled = false;
+    await ensureModel(msg.device, msg.dtype, state, emit);
+    const audio = await synthSection(msg.text, msg.voice, msg.speed, () => {}, state);
+    const buf = await (await encodeWav(audio)).arrayBuffer();
+    emit({ evt: "previewDone", buf }, [buf]);
+  } catch (err) {
+    // canRetryWasm: ensureModel already retries a WebGPU failure on WASM
+    // once, in place — but onnxruntime-web memoizes session creation in a
+    // module-level promise it never clears on rejection, so if that first
+    // attempt already failed once for a *different* device in this same
+    // worker/tab, the in-place retry just re-awaits and re-throws that
+    // stale rejection. Tell the caller so it can fall back to a fresh
+    // worker instead, which is the only way to get a clean second attempt.
+    emit({ evt: "error", message: err.message || String(err), canRetryWasm: msg.device === "webgpu" });
+  }
+}
+
+async function runGenerateInline(jobId, sections, settings, state, emit) {
+  const { voice, speed, format, device, dtype, docTitle } = settings;
+  state.cancelled = false;
+  try {
+    await ensureModel(device, dtype, state, emit);
+    const t0 = Date.now();
+    let doneChars = 0, totalSamples = 0;
+    const totalChars = sections.reduce((n, s) => n + s.text.length, 0) || 1;
+    const all = [];
+    const chapters = [];
+
+    for (let i = 0; i < sections.length; i++) {
+      if (state.cancelled) break;
+      const s = sections[i];
+      const label = s.title || (sections.length > 1 ? "Part " + (i + 1) : "Audiobook");
+      chapters.push({ title: label, startSample: totalSamples });
+
+      const audio = await synthSection(s.text, voice, speed, added => {
+        totalSamples += added;
+        const secs = totalSamples / SAMPLE_RATE;
+        const elapsed = (Date.now() - t0) / 1000;
+        emit({
+          evt: "sectionProgress", jobId, index: i, count: sections.length, label,
+          frac: (doneChars + s.text.length * 0.5) / totalChars,
+          secs, elapsed, rtf: elapsed / Math.max(secs, 0.001),
+        });
+      }, state);
+
+      doneChars += s.text.length;
+      emit({ evt: "sectionProgress", jobId, index: i, count: sections.length, label, frac: doneChars / totalChars });
+      if (state.cancelled) break;
+      if (!audio.length) continue;
+      all.push(audio);
+
+      if (sections.length > 1 && format !== "m4b") {
+        const n = String(i + 1).padStart(2, "0");
+        const blob = await encodeFormat(format, audio);
+        const buf = await blob.arrayBuffer();
+        emit({ evt: "sectionDone", jobId, index: i, label, n, buf, mime: blob.type, seconds: audio.length / SAMPLE_RATE }, [buf]);
+      }
+    }
+
+    if (state.cancelled) { emit({ jobId, evt: "cancelled" }); return; }
+    if (!all.length) { emit({ jobId, evt: "error", message: "No audio was produced." }); return; }
+
+    emit({ jobId, evt: "encoding" });
+    const full = concatFloat32(all);
+    const blob = await encodeFormat(format, full, chapters, docTitle);
+    const buf = await blob.arrayBuffer();
+    const elapsed = (Date.now() - t0) / 1000;
+    const secs = full.length / SAMPLE_RATE;
+    emit({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
+    emit({ jobId, evt: "done", elapsed, secs, device: state.resolvedDevice });
+  } catch (err) {
+    // See the matching comment in runPreviewInline for why a WebGPU failure
+    // here is worth a fresh-worker retry rather than failing the whole job.
+    emit({ jobId, evt: "error", message: err.message || String(err), canRetryWasm: device === "webgpu" });
+  }
+}
+
+// State for synthesis that runs right here on the main thread (WebGPU
+// jobs) — kept separate from the worker's own copy of the same shape, so
+// a cached WebGPU model here and a cached WASM model in the worker can
+// coexist if the user switches Device back and forth.
+const mainThreadState = { tts: null, ttsKey: "", TextSplitterStream: null, cancelled: false, resolvedDevice: null };
+
+async function webgpuUsableHere() {
+  try { return !!(navigator.gpu && await navigator.gpu.requestAdapter()); }
+  catch { return false; }
+}
 
 const WORKER_SRC = `
 "use strict";
@@ -2232,169 +2436,26 @@ const MP4_MOVIE_TIMESCALE = ${MP4_MOVIE_TIMESCALE};
 const buildM4bBytes = ${buildM4bBytes.toString()};
 const encodeM4b = ${encodeM4b.toString()};
 
-let tts = null, ttsKey = "", TextSplitterStream = null, cancelled = false;
+const importKokoro = ${importKokoro.toString()};
+const loadModel = ${loadModel.toString()};
+const ensureModel = ${ensureModel.toString()};
+const synthSection = ${synthSection.toString()};
+const encodeFormat = ${encodeFormat.toString()};
+const runPreviewInline = ${runPreviewInline.toString()};
+const runGenerateInline = ${runGenerateInline.toString()};
 
-async function ensureModel(device, dtype) {
-  const key = device + "|" + dtype;
-  if (tts && ttsKey === key) return tts;
-  if (tts) {
-    try { tts.model?.dispose?.(); } catch {}
-    tts = null; ttsKey = "";
-  }
-  let mod;
-  try {
-    mod = await import(KOKORO_URL);
-  } catch (e) {
-    throw new Error(
-      "Could not load kokoro-js from the CDN. The first run needs network access to " +
-      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
-    );
-  }
-  TextSplitterStream = mod.TextSplitterStream;
-  const seen = new Map();
-  try {
-    tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
-      dtype, device,
-      progress_callback: p => {
-        if (!p || !p.file) return;
-        if (p.status === "progress" && p.total) {
-          seen.set(p.file, { loaded: p.loaded, total: p.total });
-          let loaded = 0, total = 0;
-          for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
-          postMessage({ evt: "modelProgress", loaded, total });
-        }
-      },
-    });
-  } catch (e) {
-    // Deliberately not retried in here. onnxruntime-web memoizes its session
-    // creation in a module-level promise that it never clears on rejection
-    // (roughly: if a pending/rejected promise exists, await it and throw
-    // first; only create a new one otherwise), so a second attempt in this
-    // same worker would just re-await that stale rejected promise and
-    // re-throw the FIRST error — verbatim, regardless of what device this
-    // call asked for. The only way to get a clean retry is a fresh module
-    // registry, which means a fresh worker; see the canRetryWasm handling
-    // around the "generate" and "preview" commands below, which is where
-    // that actually happens.
-    throw new Error("Could not load the voice model: " + (e.message || e));
-  }
-  ttsKey = key;
-  let voices = [];
-  try {
-    const list = tts.list_voices?.();
-    voices = Array.isArray(list) ? list : Object.keys(list || {});
-  } catch {}
-  postMessage({ evt: "modelReady", voices });
-  return tts;
-}
-
-async function synthSection(text, voice, speed, onChunk) {
-  const splitter = new TextSplitterStream();
-  const stream = tts.stream(splitter, { voice, speed });
-  const chunks = [];
-  const consume = (async () => {
-    for await (const item of stream) {
-      if (cancelled) break;
-      const data = item.audio?.audio ?? item.audio;
-      if (data?.length) { chunks.push(data); onChunk(data.length); }
-    }
-  })();
-  splitter.push(text);
-  splitter.close();
-  await consume;
-  return concatFloat32(chunks);
-}
-
-async function encodeFormat(fmt, float32, chapters, title) {
-  if (fmt === "mp3") return encodeMp3(float32);
-  if (fmt === "m4b") return encodeM4b(float32, chapters, title);
-  return encodeWav(float32);
-}
+// This worker only ever runs the WASM/CPU path — see the comment above
+// runGenerateJob() on the main thread for why WebGPU jobs never reach here.
+const workerState = { tts: null, ttsKey: "", TextSplitterStream: null, cancelled: false, resolvedDevice: null };
+const emit = (msg, transfer) => postMessage(msg, transfer);
 
 self.onmessage = async (e) => {
   const msg = e.data;
-  if (msg.cmd === "cancel") { cancelled = true; return; }
-
-  if (msg.cmd === "preview") {
-    try {
-      cancelled = false;
-      await ensureModel(msg.device, msg.dtype);
-      const audio = await synthSection(msg.text, msg.voice, msg.speed, () => {});
-      const buf = await (await encodeWav(audio)).arrayBuffer();
-      postMessage({ evt: "previewDone", buf }, [buf]);
-    } catch (err) {
-      // Not "error": that event is routed by jobId, and a preview has none,
-      // so it would be silently dropped and leave the button stuck on
-      // "Loading..." forever with no explanation. canRetryWasm tells the
-      // main thread whether this failure was on WebGPU and so worth a
-      // fresh-worker retry on WASM — see getWorker()/resetWorker().
-      postMessage({
-        evt: "previewError", message: err.message || String(err),
-        canRetryWasm: msg.device === "webgpu",
-      });
-    }
-    return;
-  }
-
+  if (msg.cmd === "cancel") { workerState.cancelled = true; return; }
+  if (msg.cmd === "preview") { await runPreviewInline(msg, workerState, emit); return; }
   if (msg.cmd === "generate") {
-    const { jobId, sections, voice, speed, format, device, dtype, docTitle } = msg;
-    cancelled = false;
-    try {
-      await ensureModel(device, dtype);
-      const t0 = Date.now();
-      let doneChars = 0, totalSamples = 0;
-      const totalChars = sections.reduce((n, s) => n + s.text.length, 0) || 1;
-      const all = [];
-      const chapters = [];
-
-      for (let i = 0; i < sections.length; i++) {
-        if (cancelled) break;
-        const s = sections[i];
-        const label = s.title || (sections.length > 1 ? "Part " + (i + 1) : "Audiobook");
-        chapters.push({ title: label, startSample: totalSamples });
-
-        const audio = await synthSection(s.text, voice, speed, added => {
-          totalSamples += added;
-          const secs = totalSamples / SAMPLE_RATE;
-          const elapsed = (Date.now() - t0) / 1000;
-          postMessage({
-            evt: "sectionProgress", jobId, index: i, count: sections.length, label,
-            frac: (doneChars + s.text.length * 0.5) / totalChars,
-            secs, elapsed, rtf: elapsed / Math.max(secs, 0.001),
-          });
-        });
-
-        doneChars += s.text.length;
-        postMessage({ evt: "sectionProgress", jobId, index: i, count: sections.length, label, frac: doneChars / totalChars });
-        if (cancelled) break;
-        if (!audio.length) continue;
-        all.push(audio);
-
-        if (sections.length > 1 && format !== "m4b") {
-          const n = String(i + 1).padStart(2, "0");
-          const blob = await encodeFormat(format, audio);
-          const buf = await blob.arrayBuffer();
-          postMessage({ evt: "sectionDone", jobId, index: i, label, n, buf, mime: blob.type, seconds: audio.length / SAMPLE_RATE }, [buf]);
-        }
-      }
-
-      if (cancelled) { postMessage({ jobId, evt: "cancelled" }); return; }
-      if (!all.length) { postMessage({ jobId, evt: "error", message: "No audio was produced." }); return; }
-
-      postMessage({ jobId, evt: "encoding" });
-      const full = concatFloat32(all);
-      const blob = await encodeFormat(format, full, chapters, docTitle);
-      const buf = await blob.arrayBuffer();
-      const elapsed = (Date.now() - t0) / 1000;
-      const secs = full.length / SAMPLE_RATE;
-      postMessage({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
-      postMessage({ jobId, evt: "done", elapsed, secs, device });
-    } catch (err) {
-      postMessage({
-        jobId, evt: "error", message: err.message || String(err),
-        canRetryWasm: device === "webgpu",
-      });
-    }
+    const { jobId, sections, ...settings } = msg;
+    await runGenerateInline(jobId, sections, settings, workerState, emit);
   }
 };
 `;
@@ -2402,14 +2463,29 @@ self.onmessage = async (e) => {
 let worker = null;
 function getWorker() {
   if (worker) return worker;
+  // Deliberately a classic worker, not { type: "module" }: the worker
+  // source below only ever uses dynamic import() (which works the same in
+  // either kind), never static import/export — and a module worker's
+  // stricter, CORS-checked script fetch is refused outright by Chrome for
+  // a blob: URL when the page itself was opened via file:// ("Refused to
+  // cross-origin redirects of the top-level worker script"), which broke
+  // the app entirely for anyone using it the way MANUAL.md tells them to:
+  // double-click the file. Classic workers have no such restriction.
   worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })));
-  worker.onmessage = e => onWorkerMessage(e.data);
+  worker.onmessage = e => onSynthesisEvent(e.data);
   worker.onerror = e => {
     console.error(e);
-    fatal("The synthesis worker crashed: " + (e.message || e));
-    // Otherwise a crash mid-book leaves runGenerateJob's promise pending
-    // forever and the UI stuck in "generating".
-    if (activeJob) { const job = activeJob; activeJob = null; job.reject(new Error(e.message || "worker crashed")); }
+    // A worker that threw an uncaught error once does not reliably keep
+    // processing later messages (observed directly: a second postMessage
+    // after a crash produced no activity at all) — drop this instance so
+    // the next getWorker() call spins up a fresh one instead of silently
+    // hanging forever on every attempt after the first crash.
+    worker = null;
+    const message = "The synthesis worker crashed unexpectedly" + (e.message ? ` (${e.message})` : "") +
+      ". Click Generate (or Preview) again — a fresh attempt starts a new worker.";
+    fatal(message);
+    if (activeJob) { const job = activeJob; activeJob = null; job.reject(new Error(message)); }
+    if (previewInFlight) resetPreviewButton();
   };
   return worker;
 }
@@ -2474,12 +2550,14 @@ function addTrack(name, filename, blob, seconds, { first = false, zipName = file
   els.results.classList.remove("hidden");
 }
 
-// One in-flight worker job at a time; batches run their books sequentially
-// through this same worker, so a cached model carries over between them.
+// One in-flight job at a time; batches run their books sequentially through
+// the same place (worker or here on the main thread, per device), so a
+// cached model carries over between them.
 let cancelled = false;
 let jobSeq = 0;
 let activeJob = null; // { jobId, resolve, reject, bookLabel, bookIndex, bookCount, flatPrefix, zipPrefix, docTitle, ext, sections, settings }
 let previewUrl = null;
+let previewInFlight = false; // set while a preview request is outstanding; nothing else tracks it (no jobId)
 
 // Device/Precision are switched to the working combination and remembered,
 // so the next click — and, within a batch, every remaining book — goes
@@ -2499,10 +2577,20 @@ function fallbackToWasm(message) {
   resetWorker();
 }
 
-function onWorkerMessage(msg) {
+function resetPreviewButton() {
+  previewInFlight = false;
+  els.previewVoice.disabled = false;
+  els.previewVoice.textContent = "▶ Preview";
+}
+
+function onSynthesisEvent(msg) {
   if (msg.evt === "modelProgress") {
     progress(msg.loaded / msg.total);
     log(`Loading Kokoro-82M — ${(msg.loaded / 1048576).toFixed(1)} MB of ${(msg.total / 1048576).toFixed(1)} MB`);
+    return;
+  }
+  if (msg.evt === "deviceFallback") {
+    log(`WebGPU wasn't usable here (${msg.reason}) — continuing on WASM (CPU) instead. This will be slower but still works.`);
     return;
   }
   if (msg.evt === "modelReady") {
@@ -2518,19 +2606,25 @@ function onWorkerMessage(msg) {
     els.previewAudio.src = previewUrl;
     els.previewAudio.classList.remove("hidden");
     els.previewAudio.play().catch(() => {}); // autoplay can be blocked; the controls still work
-    els.previewVoice.disabled = false;
-    els.previewVoice.textContent = "▶ Preview";
+    resetPreviewButton();
     return;
   }
-  if (msg.evt === "previewError") {
-    if (msg.canRetryWasm) {
-      fallbackToWasm(msg.message);
-      firePreview("wasm", "q8");
-      return;
+  // A preview's own error path (cmd:"preview" posts {evt:"error"} with no
+  // jobId) has to be caught here, before the activeJob/jobId gate below —
+  // that gate is scoped to generate() jobs and would otherwise silently
+  // drop every preview failure, leaving the button stuck on "Loading…"
+  // forever with no feedback at all.
+  if (msg.evt === "error" && msg.jobId == null) {
+    if (previewInFlight) {
+      if (msg.canRetryWasm) {
+        fallbackToWasm(msg.message);
+        const sample = "This is what your audiobook will sound like.";
+        getWorker().postMessage({ cmd: "preview", text: sample, voice: els.voice.value, speed: +els.speed.value || 1, device: "wasm", dtype: "q8" });
+        return; // still loading; wait for the retried attempt's events
+      }
+      resetPreviewButton();
+      fatal(msg.message || "The voice preview failed.");
     }
-    fatal(msg.message);
-    els.previewVoice.disabled = false;
-    els.previewVoice.textContent = "▶ Preview";
     return;
   }
 
@@ -2573,13 +2667,21 @@ function onWorkerMessage(msg) {
 }
 
 // Resolves once this book's job finishes (or is cancelled); UI updates for
-// its events happen as a side effect of onWorkerMessage above. sections and
-// settings are kept on the job (not just spread into the postMessage) so a
-// WebGPU failure can be retried verbatim on a fresh worker — see
-// fallbackToWasm and the "error" handling in onWorkerMessage above.
-function runGenerateJob(sections, settings, bookMeta) {
+// its events happen as a side effect of onSynthesisEvent above, whether the
+// job actually ran in the worker or, for WebGPU, right here (see below).
+// sections and settings are kept on the job (not just spread into the
+// postMessage) so a WebGPU failure can be retried verbatim on a fresh
+// worker — see fallbackToWasm and the "error" handling in onSynthesisEvent
+// above.
+async function runGenerateJob(sections, settings, bookMeta) {
+  const jobId = ++jobSeq;
+  // WebGPU runs on the main thread rather than in the worker whenever it
+  // can — see the comment above the "Synthesis" section for why — so this
+  // has to know before dispatching, not after: ensureModel()'s own check
+  // happens too late to decide *where* to run, only what to do once running
+  // somewhere. WASM never reaches this branch; it always goes to the worker.
+  const useMainThread = settings.device === "webgpu" && await webgpuUsableHere();
   return new Promise((resolve, reject) => {
-    const jobId = ++jobSeq;
     activeJob = {
       jobId, resolve, reject,
       bookLabel: bookMeta.bookLabel, bookIndex: bookMeta.bookIndex, bookCount: bookMeta.bookCount,
@@ -2587,31 +2689,32 @@ function runGenerateJob(sections, settings, bookMeta) {
       docTitle: settings.docTitle, ext: settings.format,
       sections, settings,
     };
-    getWorker().postMessage({ cmd: "generate", jobId, sections, ...settings });
+    if (useMainThread) runGenerateInline(jobId, sections, settings, mainThreadState, onSynthesisEvent);
+    else getWorker().postMessage({ cmd: "generate", jobId, sections, ...settings });
   });
 }
 
-const PREVIEW_SAMPLE_TEXT = "This is what your audiobook will sound like.";
-function firePreview(device, dtype) {
-  getWorker().postMessage({
-    cmd: "preview", text: PREVIEW_SAMPLE_TEXT, voice: els.voice.value, speed: +els.speed.value || 1,
-    device, dtype,
-  });
-}
-
-els.previewVoice.addEventListener("click", () => {
-  if (activeJob) return; // the worker is mid-book; wait rather than interleave with it
+els.previewVoice.addEventListener("click", async () => {
+  if (activeJob || previewInFlight) return; // one job at a time; wait rather than interleave with it
+  els.fatal.classList.add("hidden");
+  const sample = "This is what your audiobook will sound like.";
+  previewInFlight = true;
   els.previewVoice.disabled = true;
   els.previewVoice.textContent = "Loading…";
   const device = pickDevice();
-  firePreview(device, pickDtype(device));
+  const dtype = pickDtype(device);
+  if (device === "webgpu" && await webgpuUsableHere()) {
+    runPreviewInline({ text: sample, voice: els.voice.value, speed: +els.speed.value || 1, device, dtype }, mainThreadState, onSynthesisEvent);
+  } else {
+    getWorker().postMessage({ cmd: "preview", text: sample, voice: els.voice.value, speed: +els.speed.value || 1, device, dtype });
+  }
 });
 
 async function generate() {
   cancelled = false;
   els.fatal.classList.add("hidden");
   els.go.disabled = true;
-  els.previewVoice.disabled = true; // one job at a time on the shared worker
+  els.previewVoice.disabled = true; // one job at a time, worker or main thread
   els.cancel.classList.remove("hidden");
   els.results.classList.add("hidden");
   els.tracks.innerHTML = "";
@@ -2637,12 +2740,13 @@ async function generate() {
   const speed = +els.speed.value || 1;
   const fmt = els.format.value;
   // Not const: a device that rejects the model (see fallbackToWasm and the
-  // "error" handling in onWorkerMessage) is swapped out after the first book
+  // "error" handling in onSynthesisEvent) is swapped out after the first book
   // finishes, so a batch's remaining books go straight to the working device
   // instead of repeating the same failed load and fallback on every one.
   let device = pickDevice();
   let dtype = pickDtype(device);
   const t0 = performance.now();
+  let lastDevice = device; // updated below from what actually ran, which can differ (see deviceFallback)
 
   try {
     for (let bi = 0; bi < books.length; bi++) {
@@ -2670,7 +2774,13 @@ async function generate() {
         flatPrefix: books.length > 1 ? `${bookSlug}-` : "",
         zipPrefix: books.length > 1 ? `${bookSlug}/` : "",
       });
-      if (result?.device) { device = result.device; dtype = result.dtype || dtype; }
+      // The worker (or main-thread run) may have silently fallen back off
+      // WebGPU (see the deviceFallback log line) — report what it actually
+      // ran on, not what was requested, so this line never claims a device
+      // it didn't use, and carry it forward so a batch's remaining books go
+      // straight to the working device instead of repeating the same
+      // failed load and fallback on every one.
+      if (result?.device) { device = result.device; dtype = result.dtype || dtype; lastDevice = result.device; }
       if (cancelled) break;
     }
 
@@ -2678,7 +2788,7 @@ async function generate() {
 
     const elapsed = (performance.now() - t0) / 1000;
     log(`Done — ${books.length > 1 ? books.length + " books" : "audiobook"} generated in ` +
-        `${elapsed.toFixed(1)}s on ${device}.`);
+        `${elapsed.toFixed(1)}s on ${lastDevice}.`);
     progress(null);
   } catch (e) {
     console.error(e);
@@ -2695,6 +2805,7 @@ async function generate() {
 els.go.addEventListener("click", generate);
 els.cancel.addEventListener("click", () => {
   cancelled = true;
+  mainThreadState.cancelled = true; // in case the active/last job ran here rather than in the worker
   if (worker) worker.postMessage({ cmd: "cancel" });
   log("Cancelling…");
 });
@@ -2744,10 +2855,20 @@ els.dlZip.addEventListener("click", async () => {
   }
 });
 
-if ("serviceWorker" in navigator && location.protocol !== "file:") {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js").catch(() => { /* offline install is a bonus, not a requirement */ });
-  });
+// Both are meaningless (and the manifest link actively logs a CORS error)
+// when opened straight from disk, since file:// pages can't be installed
+// as an app anyway — added dynamically so file:// never requests either.
+if (location.protocol !== "file:") {
+  const manifestLink = document.createElement("link");
+  manifestLink.rel = "manifest";
+  manifestLink.href = "zabaudiobooker.webmanifest";
+  document.head.appendChild(manifestLink);
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch(() => { /* offline install is a bonus, not a requirement */ });
+    });
+  }
 }
 
 // Exposed so the text and encoding pipeline can be exercised without the model.

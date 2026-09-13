@@ -21,8 +21,10 @@ when it genuinely needs a human ear or a real player.
 
 - Markdown, EPUB and PDF in, MP3, WAV or M4B out — one file per chapter plus a combined file.
 - Drop several documents at once to queue up a batch and generate them unattended.
-- Runs on your own machine; nothing is uploaded. Synthesis runs on a background
-  thread, so the page stays responsive while a long book is generating.
+- Runs on your own machine; nothing is uploaded. WASM/CPU synthesis runs on a
+  background thread, so the page stays responsive while a long book is
+  generating; WebGPU synthesis runs directly, since it's fast enough that a
+  brief pause is a fair trade for it (see Performance below).
 - WebGPU when the browser exposes it, WASM on the CPU otherwise.
 - Understands Markdown structure rather than reading the punctuation aloud.
 - Multilingual voices: English (US/GB), Spanish, French, Italian, Portuguese (BR), Hindi, Japanese, Mandarin.
@@ -62,7 +64,12 @@ book on a low-memory machine is better done a few chapters at a time — or
 lower **Max chunk length** (see Output below) so no single piece gets too
 large regardless of how the document is split into chapters.
 
-Synthesis runs in a Web Worker, so the tab stays responsive while it works.
+WASM/CPU synthesis runs in a Web Worker so the tab stays responsive during a
+long run; this needs nothing beyond ordinary Worker support, which every
+current browser has. WebGPU synthesis runs directly on the main thread
+instead — it's fast enough that briefly blocking the tab is a fair trade,
+and it sidesteps browsers where a page can get a WebGPU adapter on the main
+thread but not from inside a worker.
 
 ## Voices
 
@@ -266,8 +273,13 @@ before — straight into the text box, no queue in sight.
 ## Performance
 
 With WebGPU, Kokoro typically runs many times faster than real-time — a
-fraction of a minute of GPU time per minute of audio. On WASM/CPU expect
-roughly real-time on a modern laptop, which still works, just slowly.
+fraction of a minute of GPU time per minute of audio. WebGPU runs directly on
+the main thread precisely because it's this fast: the tab is briefly
+unresponsive while it works, rather than sitting in a background worker,
+which on some browsers can't get a WebGPU adapter even when the main thread
+can. On WASM/CPU expect roughly real-time on a modern laptop — slow enough
+that it runs in a background worker instead, keeping the tab responsive;
+this still works, just slowly.
 
 ## Installing as an app
 

@@ -274,6 +274,44 @@ step({
   },
 });
 
+step({
+  id: "maxchunk", title: "Long chapters are split to the configured max length",
+  why: "Automated: word counts and cut points are checked directly against a synthetic chapter of known size.",
+  kind: "auto",
+  run: async () => {
+    const { splitLongSections, wordCount, sectionsWithText, tokenizeMarkdown } = appWin.ZAB;
+    const para = n => Array.from({ length: 20 }, (_, i) => `word${n}_${i}`).join(" ") + ".";
+    const longChapter = Array.from({ length: 30 }, (_, i) => para(i)).join("\n\n"); // ~600 words
+    const sections = [{ title: "Chapter One", text: longChapter, tokens: [] }];
+
+    const split = splitLongSections(sections, 100);
+    assertTrue(split.length > 1, "a chapter well over the budget should split into several parts");
+    assertTrue(split.every(s => wordCount(s.text) <= 100), "every part should respect the word budget");
+    assertEqual(split[0].title, `Chapter One (1/${split.length})`, "split parts should be numbered in their title");
+    const rejoined = split.map(s => s.text).join(" ").replace(/\s+/g, " ").trim();
+    assertEqual(rejoined, longChapter.replace(/\s+/g, " ").trim(), "no text should be lost or duplicated across the split");
+
+    assertEqual(splitLongSections(sections, 0).length, 1, "0 should mean no limit");
+    assertTrue(splitLongSections(sections, 0)[0] === sections[0], "an unsplit section should pass through unchanged, not a copy");
+
+    // A single paragraph with no blank line anywhere, still well over budget,
+    // has to fall back to cutting between sentences rather than not split at all.
+    const oneParagraph = Array.from({ length: 40 }, (_, i) => `Sentence number ${i} has several words in it.`).join(" ");
+    const splitParagraph = splitLongSections([{ title: "Huge", text: oneParagraph, tokens: [] }], 50);
+    assertTrue(splitParagraph.length > 1, "one oversized paragraph with no blank line should still split");
+    assertTrue(splitParagraph.every(s => /^(Sentence number \d+ has several words in it\.\s*)+$/.test(s.text)),
+      "the sentence-boundary fallback should never cut mid-sentence");
+
+    // Wired through sectionsWithText (what generation actually calls), via opts.maxChunkWords.
+    const tokens = tokenizeMarkdown("## Chapter One\n\n" + longChapter);
+    const capped = sectionsWithText(tokens, 2, { maxChunkWords: 100 });
+    const uncapped = sectionsWithText(tokens, 2, { maxChunkWords: 0 });
+    assertTrue(capped.length > 1 && uncapped.length === 1, "the cap should only take effect when maxChunkWords is set");
+
+    return `A 600-word chapter split into ${split.length} parts under a 100-word budget, each one numbered and intact.`;
+  },
+});
+
 group("EPUB / PDF ingestion — instant, synthetic input");
 
 step({

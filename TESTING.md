@@ -23,9 +23,9 @@ judge.
 ## Why this needs your testing
 
 The automated tests cover the parts that can run without a network connection:
-40 assertions in `selftest.html` over Markdown parsing, chapter splitting, PDF
-and EPUB conversion, the WAV encoder, error handling and the interface. Those
-all pass.
+52 assertions in `selftest.html` over Markdown parsing, chapter splitting and
+max-chunk-length splitting, PDF and EPUB conversion, the WAV encoder, error
+handling and the interface. Those all pass.
 
 The PDF path is different, and worth saying so plainly: it **was** tested
 end-to-end here. Real PDFs were generated with running heads, folios,
@@ -116,6 +116,11 @@ rules are opinions — tell me where mine are wrong.
 - [ ] The filenames are sensible (`01-chapter-one.mp3`).
 - [ ] **Don't split** gives exactly one file.
 - [ ] The complete book plays end to end without gaps or repeats at the joins.
+- [ ] With a long chapter (or "Don't split" on a long book) and **Max chunk
+      length** set low (e.g. 2), the chapter comes out as several numbered
+      parts (`Chapter One (1/3)`, etc.) instead of one long one, and the
+      complete book still plays end to end without gaps or repeats at those
+      extra joins. Setting it to `0` turns the cap off again.
 
 ### 4. Formats
 

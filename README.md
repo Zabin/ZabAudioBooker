@@ -58,11 +58,11 @@ A current browser and, on first run only, network access to `cdn.jsdelivr.net`
 (for [kokoro-js](https://www.npmjs.com/package/kokoro-js), the MP3 encoder,
 and — only if you open an EPUB — the unzip library) and `huggingface.co` (for
 the weights). Audio is held in memory while it is generated, so a very long
-book on a low-memory machine is better done a few chapters at a time.
+book on a low-memory machine is better done a few chapters at a time — or
+lower **Max chunk length** (see Output below) so no single piece gets too
+large regardless of how the document is split into chapters.
 
-Synthesis runs in a Web Worker, which needs a browser with module worker
-support (Chrome and Edge; Firefox and Safari support varies) — this is the
-same Chrome/Edge recommendation as WebGPU above, not an extra requirement.
+Synthesis runs in a Web Worker, so the tab stays responsive while it works.
 
 ## Voices
 
@@ -209,6 +209,16 @@ Pick a heading level to split on and you get one file per chapter plus a
 combined file for the whole book, each with an inline player and a download
 link. MP3 (128 kbps) keeps an audiobook to a sensible size; WAV is 24 kHz mono
 PCM and runs about 170 MB per hour, so prefer MP3 for anything long.
+
+**Max chunk length** caps how long any single piece handed to the model can
+be, independent of chapter splitting — a chapter (or, with "Don't split," the
+whole book) estimated to run past this many minutes is cut further into
+numbered parts ("Chapter 3 (1/2)", "Chapter 3 (2/2)") so no one synthesis call
+gets large enough to make the worker sit there with no progress for a long
+stretch. Cuts land on a paragraph break wherever one exists; only a single
+paragraph that alone exceeds the limit falls back to a sentence break. Set it
+to 0 to turn the cap off. Defaults to 10 minutes, and — like the other
+settings — it's remembered between visits.
 
 **M4B** produces a single file with real, seekable chapter markers built in —
 the format most audiobook and podcast apps expect — instead of a folder of

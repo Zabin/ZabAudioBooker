@@ -233,6 +233,11 @@
         </select>
       </div>
       <div>
+        <label for="maxChunk">Max chunk length (min)</label>
+        <input type="number" id="maxChunk" value="10" min="0" max="120" step="1"
+               title="A chapter longer than this is further split so no single piece gets too large to synthesize smoothly. 0 = no limit.">
+      </div>
+      <div>
         <label for="device">Device</label>
         <select id="device">
           <option value="auto" selected>Auto</option>
@@ -594,13 +599,63 @@ function mergeShortSections(sections, minWords = MIN_SECTION_WORDS) {
   return out;
 }
 
+// Rough speaking rate at 1x, used both for the duration estimate under the
+// text box and to translate the user's "max chunk" minutes into a word count.
+const WORDS_PER_MINUTE = 150;
+
+// The inverse of mergeShortSections: a chapter estimated to run well past the
+// user's chosen length is cut into several pieces instead of being handed to
+// the model whole. A single very long synthesis call is exactly what tends to
+// make the worker sit there with no progress for a long stretch, and keeping
+// every piece under the same budget keeps progress updates coming steadily
+// whatever the chapter length.
+//
+// Cuts land on a blank line wherever one exists, matching the boundary
+// tokensToSpeech already put between every paragraph/heading/list/table/
+// quote, which is the one place guaranteed not to fall mid-sentence. Only a
+// single block that alone exceeds the budget — one long paragraph with no
+// blank line in it anywhere — falls back to cutting between sentences instead.
+function splitLongSections(sections, maxWords) {
+  if (!maxWords || maxWords <= 0) return sections; // 0 = no limit
+  const out = [];
+  for (const s of sections) {
+    if (wordCount(s.text) <= maxWords) { out.push(s); continue; }
+
+    const atoms = []; // { text, endsParagraph }: the separator to its right
+    for (const block of s.text.split("\n\n")) {
+      if (wordCount(block) <= maxWords) { atoms.push({ text: block, endsParagraph: true }); continue; }
+      const sentences = (block.match(/[^.!?]+[.!?]*\s*/g) || [block]).map(x => x.trim()).filter(Boolean);
+      sentences.forEach((text, i) => atoms.push({ text, endsParagraph: i === sentences.length - 1 }));
+    }
+
+    const parts = [];
+    let cur = [], curWords = 0;
+    for (const a of atoms) {
+      const w = wordCount(a.text);
+      if (cur.length && curWords + w > maxWords) { parts.push(cur); cur = []; curWords = 0; }
+      cur.push(a);
+      curWords += w;
+    }
+    if (cur.length) parts.push(cur);
+
+    if (parts.length <= 1) { out.push(s); continue; }
+    parts.forEach((atomsInPart, i) => {
+      const text = atomsInPart
+        .map((a, j) => a.text + (j < atomsInPart.length - 1 ? (a.endsParagraph ? "\n\n" : " ") : ""))
+        .join("");
+      out.push({ ...s, text, title: s.title ? `${s.title} (${i + 1}/${parts.length})` : s.title });
+    });
+  }
+  return out;
+}
+
 // The one place both the live preview and generation turn tokens into the
 // sections that will actually become files, so they can never disagree.
 function sectionsWithText(tokens, level, opts) {
   const sections = splitSections(tokens, level)
     .map(s => ({ ...s, text: tokensToSpeech(s.tokens, opts).trim() }))
     .filter(s => s.text);
-  return mergeShortSections(sections);
+  return splitLongSections(mergeShortSections(sections), opts?.maxChunkWords);
 }
 
 function mdToSpeech(md, opts = {}) {
@@ -1821,6 +1876,7 @@ const $ = id => document.getElementById(id);
 const els = {
   drop: $("drop"), file: $("file"), md: $("md"), stats: $("stats"), queue: $("queue"),
   voice: $("voice"), speed: $("speed"), format: $("format"), split: $("split"),
+  maxChunk: $("maxChunk"),
   device: $("device"), dtype: $("dtype"), code: $("code"), tables: $("tables"),
   numberLists: $("numberLists"), preview: $("preview"),
   previewVoice: $("previewVoice"), previewAudio: $("previewAudio"),
@@ -1870,7 +1926,7 @@ if (location.protocol === "file:") els.fileHint.classList.remove("hidden");
  * in a past run (results) are never persisted, only how to speak it. */
 
 const SETTINGS_KEY = "zab-settings";
-const SETTINGS_FIELDS = ["voice", "speed", "format", "split", "device", "dtype", "code", "tables"];
+const SETTINGS_FIELDS = ["voice", "speed", "format", "split", "maxChunk", "device", "dtype", "code", "tables"];
 
 // A saved voice id may not be one of the curated defaults shown before the
 // model loads, so setting it immediately can silently fail (an absent
@@ -1911,10 +1967,16 @@ function fatal(msg) {
 }
 
 function currentOpts() {
+  const maxChunkMinutes = +els.maxChunk.value || 0; // 0 = no limit
   return {
     code: els.code.value,
     tables: els.tables.value,
     numberLists: els.numberLists.checked,
+    // Minutes -> words depends on speed, same as the duration estimate below,
+    // so a chunk actually comes out around the length the user asked for.
+    maxChunkWords: maxChunkMinutes > 0
+      ? Math.round(maxChunkMinutes * WORDS_PER_MINUTE * (+els.speed.value || 1))
+      : 0,
   };
 }
 
@@ -1952,7 +2014,7 @@ function refresh() {
   if (!text) { els.stats.textContent = ""; return; }
 
   const words = wordCount(text);
-  const mins = words / 150 / (+els.speed.value || 1);
+  const mins = words / WORDS_PER_MINUTE / (+els.speed.value || 1);
   const parts = sectionsWithText(tokens, +els.split.value, opts).length;
   const bytes = estimateBytes(mins * 60, els.format.value);
   els.stats.textContent =
@@ -2121,7 +2183,7 @@ for (const ev of ["dragleave", "drop"]) {
   els.drop.addEventListener(ev, e => { e.preventDefault(); els.drop.classList.remove("over"); });
 }
 els.drop.addEventListener("drop", e => { if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
-for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.speed, els.format]) {
+for (const el of [els.md, els.split, els.maxChunk, els.code, els.tables, els.numberLists, els.speed, els.format]) {
   el.addEventListener("input", refresh);
   el.addEventListener("change", refresh);
 }
@@ -2693,6 +2755,7 @@ window.ZAB = {
   stripFrontMatter, tokenizeMarkdown, inlineToSpeech, tokensToSpeech,
   splitSections, mdToSpeech, slugify, decodeEntities, capLongRuns, MAX_RUN,
   MIN_SECTION_WORDS, wordCount, mergeShortSections, sectionsWithText,
+  WORDS_PER_MINUTE, splitLongSections,
   pdfPagesToMarkdown, pdfExtractPages, pdfToMarkdown, looksScanned,
   isPrivateUse, codeRuns, digitPlan, decodePages, looksLetterspaced, rejoinSpacedText,
   bodySize, groupLines, lineText, normalizeGlyphs,

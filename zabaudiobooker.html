@@ -2135,6 +2135,13 @@ for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.
  * this a single-file app. Its pure helpers (encoders, the M4B muxer) are
  * embedded via Function#toString() from the copies defined above, rather
  * than retyped, so there is exactly one source of truth for each.
+ *
+ * Deliberately a classic worker, not `{ type: "module" }`: it only ever
+ * uses dynamic import() to reach kokoro-js, never a static import, so it
+ * does not need module semantics — and a module worker loaded from a
+ * blob: URL fails to start at all when the page's own origin is null,
+ * which is exactly what file:// is. A classic worker from the same blob:
+ * URL has no such restriction, so opening this file directly still works.
  * ------------------------------------------------------------------ */
 
 const WORKER_SRC = `
@@ -2240,7 +2247,10 @@ self.onmessage = async (e) => {
       const buf = await (await encodeWav(audio)).arrayBuffer();
       postMessage({ evt: "previewDone", buf }, [buf]);
     } catch (err) {
-      postMessage({ evt: "error", message: err.message || String(err) });
+      // Not "error": that event is routed by jobId, and a preview has none,
+      // so it would be silently dropped and leave the button stuck on
+      // "Loading..." forever with no explanation.
+      postMessage({ evt: "previewError", message: err.message || String(err) });
     }
     return;
   }
@@ -2308,7 +2318,7 @@ self.onmessage = async (e) => {
 let worker = null;
 function getWorker() {
   if (worker) return worker;
-  worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })), { type: "module" });
+  worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })));
   worker.onmessage = e => onWorkerMessage(e.data);
   worker.onerror = e => {
     console.error(e);
@@ -2395,6 +2405,12 @@ function onWorkerMessage(msg) {
     els.previewAudio.src = previewUrl;
     els.previewAudio.classList.remove("hidden");
     els.previewAudio.play().catch(() => {}); // autoplay can be blocked; the controls still work
+    els.previewVoice.disabled = false;
+    els.previewVoice.textContent = "▶ Preview";
+    return;
+  }
+  if (msg.evt === "previewError") {
+    fatal(msg.message);
     els.previewVoice.disabled = false;
     els.previewVoice.textContent = "▶ Preview";
     return;

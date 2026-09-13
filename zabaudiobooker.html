@@ -692,6 +692,153 @@ function applyLigatures(text, plan) {
 
 function repairLigatures(text) { return applyLigatures(text, ligaturePlan(text)); }
 
+// Digits that never arrive. Some typesetters ship subset fonts whose glyphs are
+// named uniF643..uniF64C and no ToUnicode map with them, so pdf.js has nowhere
+// to go: every digit in the document comes through as an unassigned private-use
+// codepoint. Left alone they are invisible in the Markdown box, silent in the
+// audio, and invisible to every rule below that looks for a digit — which is
+// how a running head with a page number glued to it walked straight through the
+// furniture filter, because no two pages ever produced the same key.
+//
+// The mapping is recoverable, on two pieces of the document's own evidence: a
+// digit subset is a block of exactly ten consecutive codepoints in ascending
+// order, which is what a digit subset looks like and very little else does; and
+// the page numbers then decode to a series that climbs by one a page, which is
+// what settles it. So demand the second whenever there are folios to check.
+//
+// Exactly ten is what pins the block's first codepoint to zero. A document
+// short enough to never use one of the ten digits therefore gets no mapping at
+// all, which is the right way round: its glyphs are dropped and the reader is
+// told, rather than every number in it being shifted by a silent guess.
+const PUA_RANGES = [[0xe000, 0xf8ff], [0xf0000, 0xffffd], [0x100000, 0x10fffd]];
+
+function isPrivateUse(cp) {
+  return PUA_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
+}
+
+function privateUseCodes(pages) {
+  const seen = new Set();
+  for (const pg of pages) {
+    for (const it of pg.items) {
+      for (const ch of it.str) {
+        const cp = ch.codePointAt(0);
+        if (isPrivateUse(cp)) seen.add(cp);
+      }
+    }
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+// Split sorted codepoints into maximal consecutive runs.
+function codeRuns(codes) {
+  const runs = [];
+  for (const cp of codes) {
+    const last = runs[runs.length - 1];
+    if (last && cp === last[last.length - 1] + 1) last.push(cp);
+    else runs.push([cp]);
+  }
+  return runs;
+}
+
+// Every private-use-only string standing in a page's top or bottom margin is a
+// folio candidate. A margin holds other numbers too — a copyright year, a DOI,
+// an issue number — so gather them all per page and let the series search below
+// pick out the one that behaves like page numbering.
+function folioCandidates(pages, decode) {
+  return pages.map(pg => {
+    const vals = new Set();
+    for (const it of pg.items) {
+      const s = it.str.trim();
+      if (!s || (it.y < pg.h * 0.9 && it.y > pg.h * 0.1)) continue;
+      if (![...s].every(ch => isPrivateUse(ch.codePointAt(0)))) continue;
+      const dec = decode(s);
+      if (/^\d+$/.test(dec)) vals.add(Number(dec));
+    }
+    return vals;
+  });
+}
+
+// The longest run of pages whose candidates agree on a single numbering: some
+// value v on page i implies v + (j - i) on page j. A wrong mapping scrambles
+// the last digit from page to page and scores nothing.
+function folioSeriesLength(perPage) {
+  let best = 0;
+  perPage.forEach((vals, i) => {
+    for (const v of vals) {
+      let n = 0;
+      perPage.forEach((other, j) => { if (other.has(v + j - i)) n++; });
+      if (n > best) best = n;
+    }
+  });
+  return best;
+}
+
+function digitPlan(pages) {
+  const tenWide = codeRuns(privateUseCodes(pages)).filter(r => r.length === 10);
+  for (const run of tenWide) {
+    const map = new Map(run.map((cp, i) => [cp, String(i)]));
+    const decode = s => [...s].map(ch => map.get(ch.codePointAt(0)) ?? "").join("");
+    const perPage = folioCandidates(pages, decode);
+    const anyFolios = perPage.some(v => v.size);
+    if (!anyFolios) return map; // nothing to check it against; ten wide stands alone
+    if (folioSeriesLength(perPage) >= Math.max(3, pages.length * 0.5)) return map;
+  }
+  return new Map();
+}
+
+// Apply the plan and drop whatever is left over. An unassigned private-use
+// codepoint has no pronunciation and no meaning to recover: a speech engine
+// handed one either skips it or reads out a stray symbol name, and leaving it
+// in the text hides the gap from the person proofreading the Markdown box.
+// Geometry is deliberately untouched — the glyph still occupied its width on
+// the page, which is what the line-joining gaps are measured against.
+function decodePages(pages, plan) {
+  let dropped = 0;
+  const decoded = pages.map(pg => ({
+    ...pg,
+    items: pg.items.map(it => {
+      if (![...it.str].some(ch => isPrivateUse(ch.codePointAt(0)))) return it;
+      let str = "";
+      for (const ch of it.str) {
+        const cp = ch.codePointAt(0);
+        if (!isPrivateUse(cp)) { str += ch; continue; }
+        const mapped = plan.get(cp);
+        if (mapped === undefined) dropped++;
+        else str += mapped;
+      }
+      return { ...it, str };
+    }),
+  }));
+  return { pages: decoded, dropped };
+}
+
+// Letterspaced small caps. Journals set running heads and section headings this
+// way, and the spaces are in the PDF's own strings rather than an artefact of
+// the geometry: the text layer really does say "I N T R O D U C T I O N". Read
+// aloud that is twelve letter names, and as a furniture key it matches nothing.
+//
+// Judged over the whole line, never the single item: a letterspaced "O N" is
+// two letters and cannot be told apart from an ordinary short word, but a line
+// whose words are nearly all one letter long is unambiguous.
+function looksLetterspaced(text) {
+  const words = text.split(/\s+/).filter(w => /\p{L}/u.test(w));
+  if (words.length < 4) return false;
+  return words.filter(w => /^\p{L}$/u.test(w)).length >= words.length * 0.6;
+}
+
+// Rejoin one item of a letterspaced line. The typesetter gives each word its
+// own text item, so a single space inside an item stands between letters of one
+// word and only a wider gap separates words. Punctuation rejoins too, so
+// "W O M E N ," comes back as "WOMEN," rather than with a space before the comma.
+function rejoinSpacedText(s) {
+  if (!/\p{L}/u.test(s)) return s;
+  return s.split(/ {2,}/).map(word => word.split(" ").reduce((acc, tok) => {
+    if (!tok) return acc;
+    const joins = /^\p{L}$/u.test(tok) || !/[\p{L}\p{N}]/u.test(tok);
+    return acc && !joins ? acc + " " + tok : acc + tok;
+  }, "")).join(" ");
+}
+
 function median(nums) {
   if (!nums.length) return 0;
   const a = [...nums].sort((x, y) => x - y);
@@ -759,6 +906,7 @@ function groupLines(items, body) {
 // Join a line's items. A word split across items (a soft hyphen, a kerning
 // break) leaves no horizontal gap, so only a real gap earns a space.
 function lineText(items) {
+  const spaced = looksLetterspaced(items.map(it => it.str).join(" "));
   let out = "";
   let prev = null;
   for (const it of items) {
@@ -766,7 +914,7 @@ function lineText(items) {
       const gap = it.x - (prev.x + (prev.width || 0));
       if (gap > Math.max(0.8, it.size * 0.18)) out += " ";
     }
-    out += it.str;
+    out += spaced ? rejoinSpacedText(it.str) : it.str;
     prev = it;
   }
   return normalizeGlyphs(out).replace(/\s+/g, " ").trim();
@@ -810,6 +958,19 @@ const INDEX_LINE = /[,.]\s*\d+(\s*[,–-]\s*\d+)*\s*$/;
 const DOT_LEADER = /\.\s?\.\s?\./;
 
 function pdfPagesToMarkdown(pages, opts = {}) {
+  // Before anything else reads the text: every rule below that counts a digit,
+  // recognises a folio or compares one line against another needs the
+  // document's digits to be digits.
+  const decoded = decodePages(pages, digitPlan(pages));
+  pages = decoded.pages;
+  if (decoded.dropped && opts.onNote) {
+    opts.onNote(
+      `${decoded.dropped} character${decoded.dropped === 1 ? "" : "s"} in this PDF are ` +
+      "private-use glyphs the file gives no Unicode mapping for, so they could not be " +
+      "read and were dropped. Check the text below for gaps where numbers or symbols belong."
+    );
+  }
+
   const body = opts.bodySize || bodySize(pages);
   const ligatures = ligaturePlan(
     pages.map(pg => pg.items.map(i => i.str).join(" ")).join(" ")
@@ -969,7 +1130,7 @@ function looksScanned(pages) {
   return pages.length > 0 && chars < pages.length * 20;
 }
 
-async function pdfToMarkdown(bytes, onProgress) {
+async function pdfToMarkdown(bytes, onProgress, onNote) {
   const pages = await pdfExtractPages(bytes, onProgress);
   if (looksScanned(pages)) {
     throw new Error(
@@ -978,7 +1139,7 @@ async function pdfToMarkdown(bytes, onProgress) {
       "converter such as Marker, MinerU or Docling to get Markdown, then drop that in."
     );
   }
-  return pdfPagesToMarkdown(pages);
+  return pdfPagesToMarkdown(pages, { onNote });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1861,7 +2022,9 @@ async function convertQueueItem(item, bytesPromise) {
   renderQueue();
   try {
     if (item.kind === "pdf") {
-      item.markdown = await pdfToMarkdown(await bytesPromise, () => {});
+      item.markdown = await pdfToMarkdown(await bytesPromise, () => {}, note => {
+        item.note = note;
+      });
     } else if (item.kind === "epub") {
       const { markdown, title } = await epubToMarkdown(await bytesPromise);
       item.markdown = markdown;
@@ -1921,12 +2084,14 @@ async function loadSingleFile(f) {
   try {
     const bytes = new Uint8Array(await f.arrayBuffer());
     if (kind === "pdf") {
+      const notes = [];
       els.md.value = await pdfToMarkdown(bytes, (n, total) => {
         progress(n / total);
         log(`Reading the PDF — page ${n} of ${total}`);
-      });
+      }, note => notes.push(note));
       log("PDF converted. Check the text below before generating: headings, " +
-          "running heads and footnotes are guessed, so fix anything wrong here.");
+          "running heads and footnotes are guessed, so fix anything wrong here." +
+          (notes.length ? " " + notes.join(" ") : ""));
     } else {
       const { markdown, title } = await epubToMarkdown(bytes);
       els.md.value = markdown;
@@ -2436,6 +2601,7 @@ window.ZAB = {
   splitSections, mdToSpeech, slugify, decodeEntities, capLongRuns, MAX_RUN,
   MIN_SECTION_WORDS, wordCount, mergeShortSections, sectionsWithText,
   pdfPagesToMarkdown, pdfExtractPages, pdfToMarkdown, looksScanned,
+  isPrivateUse, codeRuns, digitPlan, decodePages, looksLetterspaced, rejoinSpacedText,
   bodySize, groupLines, lineText, normalizeGlyphs,
   itemGeometry, isUpright, repairLigatures, ligaturePlan, applyLigatures,
   pagePitch, furnitureCandidates,

@@ -47,6 +47,13 @@ You should see a page headed "ZabAudioBooker" with four numbered sections.
    scrambled, and scanned PDFs are refused with an explanation because they
    contain no text at all.
 
+   Journal PDFs get two extra repairs: letterspaced headings set
+   `I N T R O D U C T I O N` are rejoined into words, and digits hidden in an
+   unmapped private-use font block — which is how some typesetters ship every
+   number in the document — are recovered. If they cannot be recovered with
+   certainty the glyphs are dropped rather than guessed at, and the message
+   under the box tells you how many, so you know to check for missing numbers.
+
    **Dropping several files at once** (or adding one, then dropping another
    later) queues them up as a batch instead of loading straight into the box —
    see [Making several audiobooks at once](#making-several-audiobooks-at-once)

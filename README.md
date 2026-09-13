@@ -146,6 +146,7 @@ What it strips, none of which you want read aloud:
 | Footnote markers | Small glyphs riding above the baseline, digits or `* † ‡ § ¶` |
 | Footnote text | Small print sitting below the last full-size line on its page |
 | Index and contents pages | Pages mostly made of "entry, 12, 45" lines or dot leaders |
+| Unreadable glyphs | Private-use codepoints the file gives no mapping for, once digits have been recovered (see below) |
 
 A title page that sets the title, subtitle and byline in different sizes can
 still come out as several short headings rather than one clean block. Rather
@@ -164,6 +165,29 @@ Some older typesetting maps ligature glyphs onto `ª` and `º`, so "financial"
 arrives as "ªnancial" and a voice reads gibberish. That is repaired, but only
 on the document's own evidence: the glyph has to be used inside words and never
 sit against a digit, so a Spanish or Portuguese ordinal like `1ª` is untouched.
+
+Journal PDFs have two more habits worth naming, because both are silent
+failures — the text looks fine until you notice what is missing.
+
+**Digits in the private use area.** Some typesetters embed a subset font whose
+digit glyphs are named `uniF643`–`uniF64C` and ship no `ToUnicode` map with it.
+There is then nothing to translate them into, so every number in the document —
+dates, page ranges, "Resolution 1325" — arrives as unassigned private-use
+codepoints: invisible on screen, silent in the audio, and invisible to every
+rule above that looks for a digit, which is how a running head with a page
+number stuck to it used to walk straight past the furniture filter. The mapping
+is recovered from the document itself: a digit subset is a block of exactly ten
+consecutive codepoints, and the page numbers then have to decode to a series
+that climbs by one a page. If they don't, nothing is guessed — the glyphs are
+dropped and you are told how many, so you know to look. (A document too short to
+use all ten digits gets no mapping either, for the same reason.)
+
+**Letterspaced small caps.** Running heads and section headings are often set
+`I N T R O D U C T I O N`, and those spaces are really in the PDF's text, not an
+artefact of the geometry — read aloud it is twelve letter names. A line whose
+words are nearly all one letter long is rejoined into words. The judgement is
+made per line rather than per word, because a letterspaced `O N` is
+indistinguishable from an ordinary short word on its own.
 
 Limits worth knowing. **Two-column layouts will come out scrambled**, because
 lines are grouped by vertical position and a two-column page interleaves them.

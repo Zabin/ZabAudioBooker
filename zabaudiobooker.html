@@ -2172,7 +2172,7 @@ const encodeM4b = ${encodeM4b.toString()};
 
 let tts = null, ttsKey = "", TextSplitterStream = null, cancelled = false;
 
-async function ensureModel(device, dtype, isFallback) {
+async function ensureModel(device, dtype) {
   const key = device + "|" + dtype;
   if (tts && ttsKey === key) return tts;
   if (tts) {
@@ -2204,20 +2204,16 @@ async function ensureModel(device, dtype, isFallback) {
       },
     });
   } catch (e) {
-    // WebGPU limits (max buffer size, mappedAtCreation sub-limits, etc.) vary
-    // wildly across GPUs and drivers, and there is no way to query them in
-    // advance that covers every failure mode — so the only reliable test is
-    // trying to load the model and seeing whether this adapter can actually
-    // do it. wasm+q8 is the well-trodden path that works everywhere, so fall
-    // back to it once rather than leaving the book stuck on a dead device.
-    if (device === "webgpu" && !isFallback) {
-      postMessage({
-        evt: "deviceFallback",
-        message: "WebGPU couldn't load the voice model on this graphics hardware " +
-          "(" + (e.message || e) + "); switching to WASM (CPU) instead.",
-      });
-      return ensureModel("wasm", "q8", true);
-    }
+    // Deliberately not retried in here. onnxruntime-web memoizes its session
+    // creation in a module-level promise that it never clears on rejection
+    // (roughly: if a pending/rejected promise exists, await it and throw
+    // first; only create a new one otherwise), so a second attempt in this
+    // same worker would just re-await that stale rejected promise and
+    // re-throw the FIRST error — verbatim, regardless of what device this
+    // call asked for. The only way to get a clean retry is a fresh module
+    // registry, which means a fresh worker; see the canRetryWasm handling
+    // around the "generate" and "preview" commands below, which is where
+    // that actually happens.
     throw new Error("Could not load the voice model: " + (e.message || e));
   }
   ttsKey = key;
@@ -2267,8 +2263,13 @@ self.onmessage = async (e) => {
     } catch (err) {
       // Not "error": that event is routed by jobId, and a preview has none,
       // so it would be silently dropped and leave the button stuck on
-      // "Loading..." forever with no explanation.
-      postMessage({ evt: "previewError", message: err.message || String(err) });
+      // "Loading..." forever with no explanation. canRetryWasm tells the
+      // main thread whether this failure was on WebGPU and so worth a
+      // fresh-worker retry on WASM — see getWorker()/resetWorker().
+      postMessage({
+        evt: "previewError", message: err.message || String(err),
+        canRetryWasm: msg.device === "webgpu",
+      });
     }
     return;
   }
@@ -2278,9 +2279,6 @@ self.onmessage = async (e) => {
     cancelled = false;
     try {
       await ensureModel(device, dtype);
-      // ensureModel may have fallen back to a different device/precision than
-      // the ones requested (see deviceFallback above); report what actually ran.
-      const [actualDevice, actualDtype] = ttsKey ? ttsKey.split("|") : [device, dtype];
       const t0 = Date.now();
       let doneChars = 0, totalSamples = 0;
       const totalChars = sections.reduce((n, s) => n + s.text.length, 0) || 1;
@@ -2328,9 +2326,12 @@ self.onmessage = async (e) => {
       const elapsed = (Date.now() - t0) / 1000;
       const secs = full.length / SAMPLE_RATE;
       postMessage({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
-      postMessage({ jobId, evt: "done", elapsed, secs, device: actualDevice, dtype: actualDtype });
+      postMessage({ jobId, evt: "done", elapsed, secs, device });
     } catch (err) {
-      postMessage({ jobId, evt: "error", message: err.message || String(err) });
+      postMessage({
+        jobId, evt: "error", message: err.message || String(err),
+        canRetryWasm: device === "webgpu",
+      });
     }
   }
 };
@@ -2349,6 +2350,17 @@ function getWorker() {
     if (activeJob) { const job = activeJob; activeJob = null; job.reject(new Error(e.message || "worker crashed")); }
   };
   return worker;
+}
+
+// Used only to recover from a failed WebGPU load (see canRetryWasm below).
+// onnxruntime-web memoizes session creation in a module-level promise it
+// never clears on failure, so a retry within the SAME worker would just
+// re-await that stale rejection and fail identically no matter what device
+// the retry asks for — a fresh worker is a fresh module registry, which is
+// the only way to actually get a clean second attempt.
+function resetWorker() {
+  if (worker) { try { worker.terminate(); } catch {} }
+  worker = null;
 }
 
 function pickDevice() {
@@ -2404,8 +2416,26 @@ function addTrack(name, filename, blob, seconds, { first = false, zipName = file
 // through this same worker, so a cached model carries over between them.
 let cancelled = false;
 let jobSeq = 0;
-let activeJob = null; // { jobId, resolve, reject, bookLabel, bookIndex, bookCount, flatPrefix, zipPrefix, docTitle, ext }
+let activeJob = null; // { jobId, resolve, reject, bookLabel, bookIndex, bookCount, flatPrefix, zipPrefix, docTitle, ext, sections, settings }
 let previewUrl = null;
+
+// Device/Precision are switched to the working combination and remembered,
+// so the next click — and, within a batch, every remaining book — goes
+// straight to WASM instead of repeating the same failed load every time.
+function fallbackToWasm(message) {
+  log(
+    "WebGPU couldn't load the voice model on this graphics hardware (" + message +
+    "); switching to WASM (CPU) instead."
+  );
+  els.device.value = "wasm";
+  if (els.dtype.value === "auto") els.dtype.value = "q8";
+  saveSettings();
+  // A fresh worker, not the one that just failed: onnxruntime-web memoizes
+  // session creation in a module-level promise it never clears on failure,
+  // so retrying in the same worker would just re-await that stale rejection
+  // and fail identically no matter what device this retry asks for.
+  resetWorker();
+}
 
 function onWorkerMessage(msg) {
   if (msg.evt === "modelProgress") {
@@ -2417,16 +2447,6 @@ function onWorkerMessage(msg) {
     if (msg.voices?.length) fillVoices([["Voices", msg.voices.map(id => [id, id])]], pendingVoice || els.voice.value);
     pendingVoice = null;
     progress(null);
-    return;
-  }
-  if (msg.evt === "deviceFallback") {
-    log(msg.message);
-    // The hardware has now demonstrated it can't do this, so stop asking it
-    // to try again on every click — but only override Precision if the user
-    // never chose one themselves.
-    els.device.value = "wasm";
-    if (els.dtype.value === "auto") els.dtype.value = "q8";
-    saveSettings();
     return;
   }
   if (msg.evt === "previewDone") {
@@ -2441,6 +2461,11 @@ function onWorkerMessage(msg) {
     return;
   }
   if (msg.evt === "previewError") {
+    if (msg.canRetryWasm) {
+      fallbackToWasm(msg.message);
+      firePreview("wasm", "q8");
+      return;
+    }
     fatal(msg.message);
     els.previewVoice.disabled = false;
     els.previewVoice.textContent = "▶ Preview";
@@ -2471,6 +2496,14 @@ function onWorkerMessage(msg) {
     return;
   }
   if (msg.evt === "done" || msg.evt === "cancelled" || msg.evt === "error") {
+    if (msg.evt === "error" && msg.canRetryWasm) {
+      fallbackToWasm(msg.message);
+      getWorker().postMessage({
+        cmd: "generate", jobId: job.jobId, sections: job.sections,
+        ...job.settings, device: "wasm", dtype: "q8",
+      });
+      return; // same job, same jobId — wait for the retried attempt's events
+    }
     activeJob = null;
     if (msg.evt === "error") job.reject(new Error(msg.message));
     else job.resolve(msg);
@@ -2478,7 +2511,10 @@ function onWorkerMessage(msg) {
 }
 
 // Resolves once this book's job finishes (or is cancelled); UI updates for
-// its events happen as a side effect of onWorkerMessage above.
+// its events happen as a side effect of onWorkerMessage above. sections and
+// settings are kept on the job (not just spread into the postMessage) so a
+// WebGPU failure can be retried verbatim on a fresh worker — see
+// fallbackToWasm and the "error" handling in onWorkerMessage above.
 function runGenerateJob(sections, settings, bookMeta) {
   return new Promise((resolve, reject) => {
     const jobId = ++jobSeq;
@@ -2487,21 +2523,26 @@ function runGenerateJob(sections, settings, bookMeta) {
       bookLabel: bookMeta.bookLabel, bookIndex: bookMeta.bookIndex, bookCount: bookMeta.bookCount,
       flatPrefix: bookMeta.flatPrefix, zipPrefix: bookMeta.zipPrefix,
       docTitle: settings.docTitle, ext: settings.format,
+      sections, settings,
     };
     getWorker().postMessage({ cmd: "generate", jobId, sections, ...settings });
   });
 }
 
+const PREVIEW_SAMPLE_TEXT = "This is what your audiobook will sound like.";
+function firePreview(device, dtype) {
+  getWorker().postMessage({
+    cmd: "preview", text: PREVIEW_SAMPLE_TEXT, voice: els.voice.value, speed: +els.speed.value || 1,
+    device, dtype,
+  });
+}
+
 els.previewVoice.addEventListener("click", () => {
   if (activeJob) return; // the worker is mid-book; wait rather than interleave with it
-  const sample = "This is what your audiobook will sound like.";
   els.previewVoice.disabled = true;
   els.previewVoice.textContent = "Loading…";
   const device = pickDevice();
-  getWorker().postMessage({
-    cmd: "preview", text: sample, voice: els.voice.value, speed: +els.speed.value || 1,
-    device, dtype: pickDtype(device),
-  });
+  firePreview(device, pickDtype(device));
 });
 
 async function generate() {
@@ -2533,10 +2574,10 @@ async function generate() {
   const voice = els.voice.value;
   const speed = +els.speed.value || 1;
   const fmt = els.format.value;
-  // Not const: a device that rejects the model (see deviceFallback in the
-  // worker) is swapped out after the first book finishes, so a batch's
-  // remaining books go straight to the working device instead of repeating
-  // the same failed load and fallback on every single one.
+  // Not const: a device that rejects the model (see fallbackToWasm and the
+  // "error" handling in onWorkerMessage) is swapped out after the first book
+  // finishes, so a batch's remaining books go straight to the working device
+  // instead of repeating the same failed load and fallback on every one.
   let device = pickDevice();
   let dtype = pickDtype(device);
   const t0 = performance.now();

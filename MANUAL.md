@@ -156,7 +156,7 @@ lists each book's tracks under its own heading, and **Download every file** /
 | The page says the download is blocked from your filesystem | Follow the yellow hint on the page: it tells you how to serve the folder locally instead. |
 | It is very slow, or the status line said "WebGPU wasn't usable here" | Your browser's graphics card support didn't work out for this page, so it's using the processor instead. This happens automatically — nothing to do — and still works, just at roughly real time (an hour of audio takes about an hour) instead of a fraction of that. |
 | The browser tab crashes on a very long book | The audio is held in memory while it is made. Split the document and do a few chapters at a time. |
-| A red box saying the synthesis worker crashed | Click Generate (or Preview) again — it starts a fresh attempt on its own. This has turned up with very short typed-in text, so if it keeps happening, try adding a bit more text first. |
+| A red box saying the synthesis worker crashed | Click Generate (or Preview) again — it starts a fresh attempt on its own. If it keeps happening, open the browser console (F12) and send the exact text there — that pins down the real cause much faster than guessing. |
 
 ### Serving the folder
 

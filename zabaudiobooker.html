@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZabAudioBooker — Markdown to Audiobook</title>
-<link rel="manifest" href="zabaudiobooker.webmanifest">
 <meta name="theme-color" content="#2f6f4f">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
@@ -2181,7 +2180,15 @@ self.onmessage = async (e) => {
 let worker = null;
 function getWorker() {
   if (worker) return worker;
-  worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })), { type: "module" });
+  // Deliberately a classic worker, not { type: "module" }: the worker
+  // source below only ever uses dynamic import() (which works the same in
+  // either kind), never static import/export — and a module worker's
+  // stricter, CORS-checked script fetch is refused outright by Chrome for
+  // a blob: URL when the page itself was opened via file:// ("Refused to
+  // cross-origin redirects of the top-level worker script"), which broke
+  // the app entirely for anyone using it the way MANUAL.md tells them to:
+  // double-click the file. Classic workers have no such restriction.
+  worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })));
   worker.onmessage = e => onWorkerMessage(e.data);
   worker.onerror = e => {
     console.error(e);
@@ -2192,8 +2199,7 @@ function getWorker() {
     // hanging forever on every attempt after the first crash.
     worker = null;
     const message = "The synthesis worker crashed unexpectedly" + (e.message ? ` (${e.message})` : "") +
-      ". This has been seen with unusually short input text — try again with a little more text. " +
-      "A fresh attempt will start a new worker.";
+      ". Click Generate (or Preview) again — a fresh attempt starts a new worker.";
     fatal(message);
     if (activeJob) { const job = activeJob; activeJob = null; job.reject(new Error(message)); }
     if (previewInFlight) resetPreviewButton();
@@ -2499,10 +2505,20 @@ els.dlZip.addEventListener("click", async () => {
   }
 });
 
-if ("serviceWorker" in navigator && location.protocol !== "file:") {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js").catch(() => { /* offline install is a bonus, not a requirement */ });
-  });
+// Both are meaningless (and the manifest link actively logs a CORS error)
+// when opened straight from disk, since file:// pages can't be installed
+// as an app anyway — added dynamically so file:// never requests either.
+if (location.protocol !== "file:") {
+  const manifestLink = document.createElement("link");
+  manifestLink.rel = "manifest";
+  manifestLink.href = "zabaudiobooker.webmanifest";
+  document.head.appendChild(manifestLink);
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch(() => { /* offline install is a bonus, not a requirement */ });
+    });
+  }
 }
 
 // Exposed so the text and encoding pipeline can be exercised without the model.

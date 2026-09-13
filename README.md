@@ -60,9 +60,8 @@ and — only if you open an EPUB — the unzip library) and `huggingface.co` (fo
 the weights). Audio is held in memory while it is generated, so a very long
 book on a low-memory machine is better done a few chapters at a time.
 
-Synthesis runs in a Web Worker, which needs a browser with module worker
-support (Chrome and Edge; Firefox and Safari support varies) — this is the
-same Chrome/Edge recommendation as WebGPU above, not an extra requirement.
+Synthesis runs in a Web Worker so the tab stays responsive; this needs
+nothing beyond ordinary Worker support, which every current browser has.
 
 ## Voices
 

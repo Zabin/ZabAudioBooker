@@ -55,19 +55,26 @@ Specifically unverified:
   WebGPU works on the main thread but not in a worker has not been used to
   confirm the fallback triggers on genuine hardware, only that it triggers
   correctly when no adapter is available at all (true of this sandbox).
-- Whether the worker can actually crash on real (non-mocked) short input,
-  and if so, on what — a report came in of "worker crashed" specifically
-  for short manually-typed text. Two real bugs in the surrounding error
-  handling were found and fixed while investigating (a crashed worker
-  silently stayed dead for every later attempt, and a preview failure of
-  any kind — not just a crash — left the Preview button stuck on
-  "Loading…" forever with no message at all), both confirmed with a
-  simulated crash. What was **not** confirmed is the original trigger
-  itself: whether short text genuinely crashes kokoro-js/onnxruntime-web,
-  as opposed to failing normally (which was already handled correctly).
-  If it recurs, the exact browser console output is what's needed to
-  pin down the real cause — the app now at least recovers cleanly either
-  way instead of getting stuck.
+- Whether the worker still crashes at all now that its real cause is
+  fixed. A report of "worker crashed" turned out to have nothing to do
+  with short text (an earlier guess, made before the console output was
+  available) — it was Chrome flatly refusing to create a *module* worker
+  from a blob: URL when the page itself is opened via `file://`
+  ("Refused to cross-origin redirects of the top-level worker script"),
+  which broke generation and preview for anyone using the app the way
+  MANUAL.md tells them to: double-click the file. Fixed by using a
+  classic worker instead (the source never used static import/export
+  anyway, only dynamic import(), which works the same in either kind).
+  Confirmed directly: the exact same scenario that crashed before —
+  generate() over `file://` — now completes with zero console errors.
+  While investigating, two more bugs turned up in the surrounding error
+  handling and were fixed too: a crashed worker silently stayed dead for
+  every later attempt, and a preview failure of any kind (not just a
+  crash) left the Preview button stuck on "Loading…" forever with no
+  message at all. All three fixes are unit- and browser-tested; what
+  isn't tested is a real, unmocked model actually running to completion
+  under `file://`, which needs real network access this sandbox doesn't
+  have.
 - Whether MP3 encoding works — that library is loaded on demand and has never
   been loaded.
 - Whether an M4B file actually plays, and shows chapters, in real audiobook

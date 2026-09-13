@@ -274,6 +274,44 @@ step({
   },
 });
 
+step({
+  id: "maxchunk", title: "Long chapters are split to the configured max length",
+  why: "Automated: word counts and cut points are checked directly against a synthetic chapter of known size.",
+  kind: "auto",
+  run: async () => {
+    const { splitLongSections, wordCount, sectionsWithText, tokenizeMarkdown } = appWin.ZAB;
+    const para = n => Array.from({ length: 20 }, (_, i) => `word${n}_${i}`).join(" ") + ".";
+    const longChapter = Array.from({ length: 30 }, (_, i) => para(i)).join("\n\n"); // ~600 words
+    const sections = [{ title: "Chapter One", text: longChapter, tokens: [] }];
+
+    const split = splitLongSections(sections, 100);
+    assertTrue(split.length > 1, "a chapter well over the budget should split into several parts");
+    assertTrue(split.every(s => wordCount(s.text) <= 100), "every part should respect the word budget");
+    assertEqual(split[0].title, `Chapter One (1/${split.length})`, "split parts should be numbered in their title");
+    const rejoined = split.map(s => s.text).join(" ").replace(/\s+/g, " ").trim();
+    assertEqual(rejoined, longChapter.replace(/\s+/g, " ").trim(), "no text should be lost or duplicated across the split");
+
+    assertEqual(splitLongSections(sections, 0).length, 1, "0 should mean no limit");
+    assertTrue(splitLongSections(sections, 0)[0] === sections[0], "an unsplit section should pass through unchanged, not a copy");
+
+    // A single paragraph with no blank line anywhere, still well over budget,
+    // has to fall back to cutting between sentences rather than not split at all.
+    const oneParagraph = Array.from({ length: 40 }, (_, i) => `Sentence number ${i} has several words in it.`).join(" ");
+    const splitParagraph = splitLongSections([{ title: "Huge", text: oneParagraph, tokens: [] }], 50);
+    assertTrue(splitParagraph.length > 1, "one oversized paragraph with no blank line should still split");
+    assertTrue(splitParagraph.every(s => /^(Sentence number \d+ has several words in it\.\s*)+$/.test(s.text)),
+      "the sentence-boundary fallback should never cut mid-sentence");
+
+    // Wired through sectionsWithText (what generation actually calls), via opts.maxChunkWords.
+    const tokens = tokenizeMarkdown("## Chapter One\n\n" + longChapter);
+    const capped = sectionsWithText(tokens, 2, { maxChunkWords: 100 });
+    const uncapped = sectionsWithText(tokens, 2, { maxChunkWords: 0 });
+    assertTrue(capped.length > 1 && uncapped.length === 1, "the cap should only take effect when maxChunkWords is set");
+
+    return `A 600-word chapter split into ${split.length} parts under a 100-word budget, each one numbered and intact.`;
+  },
+});
+
 group("EPUB / PDF ingestion — instant, synthetic input");
 
 step({
@@ -325,6 +363,64 @@ step({
     assertMatch(md, /first paragraph/, "body text should survive");
     assertTrue(!/(^|\s)1(\s|$)/.test(md.split("first paragraph")[1]?.slice(0, 20) || ""), "bare folio should not leak into the text");
     return "Running heads and folios stripped; large text promoted to a heading.";
+  },
+});
+
+step({
+  id: "pdf-pua", title: "Digits hidden in the private use area are recovered",
+  why: "Automated: a synthetic book whose digits sit in an unmapped private-use block, exactly as a journal PDF with no ToUnicode map delivers them.",
+  kind: "auto",
+  run: async () => {
+    // Digits encoded as U+F643..U+F64C, the way a subset font with glyphs named
+    // uniF643..uniF64C and no ToUnicode map arrives from pdf.js.
+    const enc = n => String(n).replace(/\d/g, d => String.fromCharCode(0xf643 + Number(d)));
+    const mkItem = (str, x, y, size) => ({ str, x, y, size, rot: 0, width: str.length * size * 0.5 });
+    // Folios 463-472 cross a decade, so all ten digits appear, as they do in any
+    // real book.
+    const book = (folio, p) => ({ page: p + 1, w: 400, h: 700, items: [
+      mkItem(enc(folio), 60, 670, 9),
+      mkItem("Running Head", 150, 670, 9),
+      mkItem(`Resolution ${enc(1325)} was adopted in ${enc(2000)}.`, 60, 600 - p, 11),
+      mkItem("\uE0A1\uE0A2", 60, 560, 11),                   // unmappable private-use junk
+    ] });
+
+    const notes = [];
+    const pages = Array.from({ length: 10 }, (_, p) => book(463 + p, p));
+    const md = appWin.ZAB.pdfPagesToMarkdown(pages, { bodySize: 11, onNote: n => notes.push(n) });
+    assertMatch(md, /Resolution 1325 was adopted in 2000\./, "private-use digits should decode to real digits");
+    assertTrue(!/[\uE000-\uF8FF]/.test(md), "no private-use character should survive into the text");
+    assertTrue(!md.includes("Running Head"), "the running head should be stripped once its folio decodes");
+    assertTrue(!/\b4[67]\d\b/.test(md), "the decoded folio itself should not leak into the text");
+    assertTrue(notes.length === 1, "dropping unmappable glyphs should be reported to the user once");
+
+    // Folios that do not climb by one a page are not folios, and must veto the
+    // mapping rather than have every number in the book guessed at.
+    const scrambled = Array.from({ length: 10 }, (_, p) => book(700 + p * 37, p));
+    const vetoed = [];
+    const md2 = appWin.ZAB.pdfPagesToMarkdown(scrambled, { bodySize: 11, onNote: n => vetoed.push(n) });
+    assertTrue(!/1325/.test(md2), "without a folio series to confirm it, no mapping should be applied");
+    assertEqual(vetoed.length, 1, "the undecodable digits should be reported instead");
+
+    return "Digits decoded from the private-use block and confirmed against the folio series; unmappable glyphs dropped and reported; an unconfirmed mapping refused.";
+  },
+});
+
+step({
+  id: "pdf-letterspaced", title: "Letterspaced small caps are rejoined into words",
+  why: "Automated: the spaces are in the PDF's own strings, so the expected output is exact.",
+  kind: "auto",
+  run: async () => {
+    const { looksLetterspaced, rejoinSpacedText, lineText } = appWin.ZAB;
+    assertTrue(looksLetterspaced("I N T R O D U C T I O N"), "an all-single-letter line is letterspaced");
+    assertTrue(!looksLetterspaced("This is an ordinary line of prose."), "prose is not letterspaced");
+    assertTrue(!looksLetterspaced("A B C"), "three letters alone are too little to go on");
+    assertEqual(rejoinSpacedText("W O M E N ,"), "WOMEN,", "punctuation should rejoin without a space");
+    // Each letterspaced word is its own text item, and the gap between items is
+    // what separates the words.
+    const mk = (str, x) => ({ str, x, y: 600, size: 7, rot: 0, width: str.length * 3 });
+    const line = lineText([mk("J E N N Y", 100), mk("L O R E N T Z E N", 140)]);
+    assertEqual(line, "JENNY LORENTZEN", "item boundaries should become word boundaries");
+    return "Letterspaced headings rejoin into words; ordinary prose is left alone.";
   },
 });
 

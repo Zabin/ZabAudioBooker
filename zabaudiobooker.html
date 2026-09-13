@@ -233,6 +233,11 @@
         </select>
       </div>
       <div>
+        <label for="maxChunk">Max chunk length (min)</label>
+        <input type="number" id="maxChunk" value="10" min="0" max="120" step="1"
+               title="A chapter longer than this is further split so no single piece gets too large to synthesize smoothly. 0 = no limit.">
+      </div>
+      <div>
         <label for="device">Device</label>
         <select id="device">
           <option value="auto" selected>Auto</option>
@@ -594,13 +599,63 @@ function mergeShortSections(sections, minWords = MIN_SECTION_WORDS) {
   return out;
 }
 
+// Rough speaking rate at 1x, used both for the duration estimate under the
+// text box and to translate the user's "max chunk" minutes into a word count.
+const WORDS_PER_MINUTE = 150;
+
+// The inverse of mergeShortSections: a chapter estimated to run well past the
+// user's chosen length is cut into several pieces instead of being handed to
+// the model whole. A single very long synthesis call is exactly what tends to
+// make the worker sit there with no progress for a long stretch, and keeping
+// every piece under the same budget keeps progress updates coming steadily
+// whatever the chapter length.
+//
+// Cuts land on a blank line wherever one exists, matching the boundary
+// tokensToSpeech already put between every paragraph/heading/list/table/
+// quote, which is the one place guaranteed not to fall mid-sentence. Only a
+// single block that alone exceeds the budget — one long paragraph with no
+// blank line in it anywhere — falls back to cutting between sentences instead.
+function splitLongSections(sections, maxWords) {
+  if (!maxWords || maxWords <= 0) return sections; // 0 = no limit
+  const out = [];
+  for (const s of sections) {
+    if (wordCount(s.text) <= maxWords) { out.push(s); continue; }
+
+    const atoms = []; // { text, endsParagraph }: the separator to its right
+    for (const block of s.text.split("\n\n")) {
+      if (wordCount(block) <= maxWords) { atoms.push({ text: block, endsParagraph: true }); continue; }
+      const sentences = (block.match(/[^.!?]+[.!?]*\s*/g) || [block]).map(x => x.trim()).filter(Boolean);
+      sentences.forEach((text, i) => atoms.push({ text, endsParagraph: i === sentences.length - 1 }));
+    }
+
+    const parts = [];
+    let cur = [], curWords = 0;
+    for (const a of atoms) {
+      const w = wordCount(a.text);
+      if (cur.length && curWords + w > maxWords) { parts.push(cur); cur = []; curWords = 0; }
+      cur.push(a);
+      curWords += w;
+    }
+    if (cur.length) parts.push(cur);
+
+    if (parts.length <= 1) { out.push(s); continue; }
+    parts.forEach((atomsInPart, i) => {
+      const text = atomsInPart
+        .map((a, j) => a.text + (j < atomsInPart.length - 1 ? (a.endsParagraph ? "\n\n" : " ") : ""))
+        .join("");
+      out.push({ ...s, text, title: s.title ? `${s.title} (${i + 1}/${parts.length})` : s.title });
+    });
+  }
+  return out;
+}
+
 // The one place both the live preview and generation turn tokens into the
 // sections that will actually become files, so they can never disagree.
 function sectionsWithText(tokens, level, opts) {
   const sections = splitSections(tokens, level)
     .map(s => ({ ...s, text: tokensToSpeech(s.tokens, opts).trim() }))
     .filter(s => s.text);
-  return mergeShortSections(sections);
+  return splitLongSections(mergeShortSections(sections), opts?.maxChunkWords);
 }
 
 function mdToSpeech(md, opts = {}) {
@@ -692,6 +747,153 @@ function applyLigatures(text, plan) {
 
 function repairLigatures(text) { return applyLigatures(text, ligaturePlan(text)); }
 
+// Digits that never arrive. Some typesetters ship subset fonts whose glyphs are
+// named uniF643..uniF64C and no ToUnicode map with them, so pdf.js has nowhere
+// to go: every digit in the document comes through as an unassigned private-use
+// codepoint. Left alone they are invisible in the Markdown box, silent in the
+// audio, and invisible to every rule below that looks for a digit — which is
+// how a running head with a page number glued to it walked straight through the
+// furniture filter, because no two pages ever produced the same key.
+//
+// The mapping is recoverable, on two pieces of the document's own evidence: a
+// digit subset is a block of exactly ten consecutive codepoints in ascending
+// order, which is what a digit subset looks like and very little else does; and
+// the page numbers then decode to a series that climbs by one a page, which is
+// what settles it. So demand the second whenever there are folios to check.
+//
+// Exactly ten is what pins the block's first codepoint to zero. A document
+// short enough to never use one of the ten digits therefore gets no mapping at
+// all, which is the right way round: its glyphs are dropped and the reader is
+// told, rather than every number in it being shifted by a silent guess.
+const PUA_RANGES = [[0xe000, 0xf8ff], [0xf0000, 0xffffd], [0x100000, 0x10fffd]];
+
+function isPrivateUse(cp) {
+  return PUA_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
+}
+
+function privateUseCodes(pages) {
+  const seen = new Set();
+  for (const pg of pages) {
+    for (const it of pg.items) {
+      for (const ch of it.str) {
+        const cp = ch.codePointAt(0);
+        if (isPrivateUse(cp)) seen.add(cp);
+      }
+    }
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+// Split sorted codepoints into maximal consecutive runs.
+function codeRuns(codes) {
+  const runs = [];
+  for (const cp of codes) {
+    const last = runs[runs.length - 1];
+    if (last && cp === last[last.length - 1] + 1) last.push(cp);
+    else runs.push([cp]);
+  }
+  return runs;
+}
+
+// Every private-use-only string standing in a page's top or bottom margin is a
+// folio candidate. A margin holds other numbers too — a copyright year, a DOI,
+// an issue number — so gather them all per page and let the series search below
+// pick out the one that behaves like page numbering.
+function folioCandidates(pages, decode) {
+  return pages.map(pg => {
+    const vals = new Set();
+    for (const it of pg.items) {
+      const s = it.str.trim();
+      if (!s || (it.y < pg.h * 0.9 && it.y > pg.h * 0.1)) continue;
+      if (![...s].every(ch => isPrivateUse(ch.codePointAt(0)))) continue;
+      const dec = decode(s);
+      if (/^\d+$/.test(dec)) vals.add(Number(dec));
+    }
+    return vals;
+  });
+}
+
+// The longest run of pages whose candidates agree on a single numbering: some
+// value v on page i implies v + (j - i) on page j. A wrong mapping scrambles
+// the last digit from page to page and scores nothing.
+function folioSeriesLength(perPage) {
+  let best = 0;
+  perPage.forEach((vals, i) => {
+    for (const v of vals) {
+      let n = 0;
+      perPage.forEach((other, j) => { if (other.has(v + j - i)) n++; });
+      if (n > best) best = n;
+    }
+  });
+  return best;
+}
+
+function digitPlan(pages) {
+  const tenWide = codeRuns(privateUseCodes(pages)).filter(r => r.length === 10);
+  for (const run of tenWide) {
+    const map = new Map(run.map((cp, i) => [cp, String(i)]));
+    const decode = s => [...s].map(ch => map.get(ch.codePointAt(0)) ?? "").join("");
+    const perPage = folioCandidates(pages, decode);
+    const anyFolios = perPage.some(v => v.size);
+    if (!anyFolios) return map; // nothing to check it against; ten wide stands alone
+    if (folioSeriesLength(perPage) >= Math.max(3, pages.length * 0.5)) return map;
+  }
+  return new Map();
+}
+
+// Apply the plan and drop whatever is left over. An unassigned private-use
+// codepoint has no pronunciation and no meaning to recover: a speech engine
+// handed one either skips it or reads out a stray symbol name, and leaving it
+// in the text hides the gap from the person proofreading the Markdown box.
+// Geometry is deliberately untouched — the glyph still occupied its width on
+// the page, which is what the line-joining gaps are measured against.
+function decodePages(pages, plan) {
+  let dropped = 0;
+  const decoded = pages.map(pg => ({
+    ...pg,
+    items: pg.items.map(it => {
+      if (![...it.str].some(ch => isPrivateUse(ch.codePointAt(0)))) return it;
+      let str = "";
+      for (const ch of it.str) {
+        const cp = ch.codePointAt(0);
+        if (!isPrivateUse(cp)) { str += ch; continue; }
+        const mapped = plan.get(cp);
+        if (mapped === undefined) dropped++;
+        else str += mapped;
+      }
+      return { ...it, str };
+    }),
+  }));
+  return { pages: decoded, dropped };
+}
+
+// Letterspaced small caps. Journals set running heads and section headings this
+// way, and the spaces are in the PDF's own strings rather than an artefact of
+// the geometry: the text layer really does say "I N T R O D U C T I O N". Read
+// aloud that is twelve letter names, and as a furniture key it matches nothing.
+//
+// Judged over the whole line, never the single item: a letterspaced "O N" is
+// two letters and cannot be told apart from an ordinary short word, but a line
+// whose words are nearly all one letter long is unambiguous.
+function looksLetterspaced(text) {
+  const words = text.split(/\s+/).filter(w => /\p{L}/u.test(w));
+  if (words.length < 4) return false;
+  return words.filter(w => /^\p{L}$/u.test(w)).length >= words.length * 0.6;
+}
+
+// Rejoin one item of a letterspaced line. The typesetter gives each word its
+// own text item, so a single space inside an item stands between letters of one
+// word and only a wider gap separates words. Punctuation rejoins too, so
+// "W O M E N ," comes back as "WOMEN," rather than with a space before the comma.
+function rejoinSpacedText(s) {
+  if (!/\p{L}/u.test(s)) return s;
+  return s.split(/ {2,}/).map(word => word.split(" ").reduce((acc, tok) => {
+    if (!tok) return acc;
+    const joins = /^\p{L}$/u.test(tok) || !/[\p{L}\p{N}]/u.test(tok);
+    return acc && !joins ? acc + " " + tok : acc + tok;
+  }, "")).join(" ");
+}
+
 function median(nums) {
   if (!nums.length) return 0;
   const a = [...nums].sort((x, y) => x - y);
@@ -759,6 +961,7 @@ function groupLines(items, body) {
 // Join a line's items. A word split across items (a soft hyphen, a kerning
 // break) leaves no horizontal gap, so only a real gap earns a space.
 function lineText(items) {
+  const spaced = looksLetterspaced(items.map(it => it.str).join(" "));
   let out = "";
   let prev = null;
   for (const it of items) {
@@ -766,7 +969,7 @@ function lineText(items) {
       const gap = it.x - (prev.x + (prev.width || 0));
       if (gap > Math.max(0.8, it.size * 0.18)) out += " ";
     }
-    out += it.str;
+    out += spaced ? rejoinSpacedText(it.str) : it.str;
     prev = it;
   }
   return normalizeGlyphs(out).replace(/\s+/g, " ").trim();
@@ -810,6 +1013,19 @@ const INDEX_LINE = /[,.]\s*\d+(\s*[,–-]\s*\d+)*\s*$/;
 const DOT_LEADER = /\.\s?\.\s?\./;
 
 function pdfPagesToMarkdown(pages, opts = {}) {
+  // Before anything else reads the text: every rule below that counts a digit,
+  // recognises a folio or compares one line against another needs the
+  // document's digits to be digits.
+  const decoded = decodePages(pages, digitPlan(pages));
+  pages = decoded.pages;
+  if (decoded.dropped && opts.onNote) {
+    opts.onNote(
+      `${decoded.dropped} character${decoded.dropped === 1 ? "" : "s"} in this PDF are ` +
+      "private-use glyphs the file gives no Unicode mapping for, so they could not be " +
+      "read and were dropped. Check the text below for gaps where numbers or symbols belong."
+    );
+  }
+
   const body = opts.bodySize || bodySize(pages);
   const ligatures = ligaturePlan(
     pages.map(pg => pg.items.map(i => i.str).join(" ")).join(" ")
@@ -969,7 +1185,7 @@ function looksScanned(pages) {
   return pages.length > 0 && chars < pages.length * 20;
 }
 
-async function pdfToMarkdown(bytes, onProgress) {
+async function pdfToMarkdown(bytes, onProgress, onNote) {
   const pages = await pdfExtractPages(bytes, onProgress);
   if (looksScanned(pages)) {
     throw new Error(
@@ -978,7 +1194,7 @@ async function pdfToMarkdown(bytes, onProgress) {
       "converter such as Marker, MinerU or Docling to get Markdown, then drop that in."
     );
   }
-  return pdfPagesToMarkdown(pages);
+  return pdfPagesToMarkdown(pages, { onNote });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1660,6 +1876,7 @@ const $ = id => document.getElementById(id);
 const els = {
   drop: $("drop"), file: $("file"), md: $("md"), stats: $("stats"), queue: $("queue"),
   voice: $("voice"), speed: $("speed"), format: $("format"), split: $("split"),
+  maxChunk: $("maxChunk"),
   device: $("device"), dtype: $("dtype"), code: $("code"), tables: $("tables"),
   numberLists: $("numberLists"), preview: $("preview"),
   previewVoice: $("previewVoice"), previewAudio: $("previewAudio"),
@@ -1709,7 +1926,7 @@ if (location.protocol === "file:") els.fileHint.classList.remove("hidden");
  * in a past run (results) are never persisted, only how to speak it. */
 
 const SETTINGS_KEY = "zab-settings";
-const SETTINGS_FIELDS = ["voice", "speed", "format", "split", "device", "dtype", "code", "tables"];
+const SETTINGS_FIELDS = ["voice", "speed", "format", "split", "maxChunk", "device", "dtype", "code", "tables"];
 
 // A saved voice id may not be one of the curated defaults shown before the
 // model loads, so setting it immediately can silently fail (an absent
@@ -1750,10 +1967,16 @@ function fatal(msg) {
 }
 
 function currentOpts() {
+  const maxChunkMinutes = +els.maxChunk.value || 0; // 0 = no limit
   return {
     code: els.code.value,
     tables: els.tables.value,
     numberLists: els.numberLists.checked,
+    // Minutes -> words depends on speed, same as the duration estimate below,
+    // so a chunk actually comes out around the length the user asked for.
+    maxChunkWords: maxChunkMinutes > 0
+      ? Math.round(maxChunkMinutes * WORDS_PER_MINUTE * (+els.speed.value || 1))
+      : 0,
   };
 }
 
@@ -1791,7 +2014,7 @@ function refresh() {
   if (!text) { els.stats.textContent = ""; return; }
 
   const words = wordCount(text);
-  const mins = words / 150 / (+els.speed.value || 1);
+  const mins = words / WORDS_PER_MINUTE / (+els.speed.value || 1);
   const parts = sectionsWithText(tokens, +els.split.value, opts).length;
   const bytes = estimateBytes(mins * 60, els.format.value);
   els.stats.textContent =
@@ -1861,7 +2084,9 @@ async function convertQueueItem(item, bytesPromise) {
   renderQueue();
   try {
     if (item.kind === "pdf") {
-      item.markdown = await pdfToMarkdown(await bytesPromise, () => {});
+      item.markdown = await pdfToMarkdown(await bytesPromise, () => {}, note => {
+        item.note = note;
+      });
     } else if (item.kind === "epub") {
       const { markdown, title } = await epubToMarkdown(await bytesPromise);
       item.markdown = markdown;
@@ -1921,12 +2146,14 @@ async function loadSingleFile(f) {
   try {
     const bytes = new Uint8Array(await f.arrayBuffer());
     if (kind === "pdf") {
+      const notes = [];
       els.md.value = await pdfToMarkdown(bytes, (n, total) => {
         progress(n / total);
         log(`Reading the PDF — page ${n} of ${total}`);
-      });
+      }, note => notes.push(note));
       log("PDF converted. Check the text below before generating: headings, " +
-          "running heads and footnotes are guessed, so fix anything wrong here.");
+          "running heads and footnotes are guessed, so fix anything wrong here." +
+          (notes.length ? " " + notes.join(" ") : ""));
     } else {
       const { markdown, title } = await epubToMarkdown(bytes);
       els.md.value = markdown;
@@ -1956,7 +2183,7 @@ for (const ev of ["dragleave", "drop"]) {
   els.drop.addEventListener(ev, e => { e.preventDefault(); els.drop.classList.remove("over"); });
 }
 els.drop.addEventListener("drop", e => { if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
-for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.speed, els.format]) {
+for (const el of [els.md, els.split, els.maxChunk, els.code, els.tables, els.numberLists, els.speed, els.format]) {
   el.addEventListener("input", refresh);
   el.addEventListener("change", refresh);
 }
@@ -1970,6 +2197,13 @@ for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.
  * this a single-file app. Its pure helpers (encoders, the M4B muxer) are
  * embedded via Function#toString() from the copies defined above, rather
  * than retyped, so there is exactly one source of truth for each.
+ *
+ * Deliberately a classic worker, not `{ type: "module" }`: it only ever
+ * uses dynamic import() to reach kokoro-js, never a static import, so it
+ * does not need module semantics — and a module worker loaded from a
+ * blob: URL fails to start at all when the page's own origin is null,
+ * which is exactly what file:// is. A classic worker from the same blob:
+ * URL has no such restriction, so opening this file directly still works.
  * ------------------------------------------------------------------ */
 
 const WORKER_SRC = `
@@ -2018,18 +2252,32 @@ async function ensureModel(device, dtype) {
   }
   TextSplitterStream = mod.TextSplitterStream;
   const seen = new Map();
-  tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
-    dtype, device,
-    progress_callback: p => {
-      if (!p || !p.file) return;
-      if (p.status === "progress" && p.total) {
-        seen.set(p.file, { loaded: p.loaded, total: p.total });
-        let loaded = 0, total = 0;
-        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
-        postMessage({ evt: "modelProgress", loaded, total });
-      }
-    },
-  });
+  try {
+    tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
+      dtype, device,
+      progress_callback: p => {
+        if (!p || !p.file) return;
+        if (p.status === "progress" && p.total) {
+          seen.set(p.file, { loaded: p.loaded, total: p.total });
+          let loaded = 0, total = 0;
+          for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
+          postMessage({ evt: "modelProgress", loaded, total });
+        }
+      },
+    });
+  } catch (e) {
+    // Deliberately not retried in here. onnxruntime-web memoizes its session
+    // creation in a module-level promise that it never clears on rejection
+    // (roughly: if a pending/rejected promise exists, await it and throw
+    // first; only create a new one otherwise), so a second attempt in this
+    // same worker would just re-await that stale rejected promise and
+    // re-throw the FIRST error — verbatim, regardless of what device this
+    // call asked for. The only way to get a clean retry is a fresh module
+    // registry, which means a fresh worker; see the canRetryWasm handling
+    // around the "generate" and "preview" commands below, which is where
+    // that actually happens.
+    throw new Error("Could not load the voice model: " + (e.message || e));
+  }
   ttsKey = key;
   let voices = [];
   try {
@@ -2075,7 +2323,15 @@ self.onmessage = async (e) => {
       const buf = await (await encodeWav(audio)).arrayBuffer();
       postMessage({ evt: "previewDone", buf }, [buf]);
     } catch (err) {
-      postMessage({ evt: "error", message: err.message || String(err) });
+      // Not "error": that event is routed by jobId, and a preview has none,
+      // so it would be silently dropped and leave the button stuck on
+      // "Loading..." forever with no explanation. canRetryWasm tells the
+      // main thread whether this failure was on WebGPU and so worth a
+      // fresh-worker retry on WASM — see getWorker()/resetWorker().
+      postMessage({
+        evt: "previewError", message: err.message || String(err),
+        canRetryWasm: msg.device === "webgpu",
+      });
     }
     return;
   }
@@ -2134,7 +2390,10 @@ self.onmessage = async (e) => {
       postMessage({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
       postMessage({ jobId, evt: "done", elapsed, secs, device });
     } catch (err) {
-      postMessage({ jobId, evt: "error", message: err.message || String(err) });
+      postMessage({
+        jobId, evt: "error", message: err.message || String(err),
+        canRetryWasm: device === "webgpu",
+      });
     }
   }
 };
@@ -2143,7 +2402,7 @@ self.onmessage = async (e) => {
 let worker = null;
 function getWorker() {
   if (worker) return worker;
-  worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })), { type: "module" });
+  worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })));
   worker.onmessage = e => onWorkerMessage(e.data);
   worker.onerror = e => {
     console.error(e);
@@ -2153,6 +2412,17 @@ function getWorker() {
     if (activeJob) { const job = activeJob; activeJob = null; job.reject(new Error(e.message || "worker crashed")); }
   };
   return worker;
+}
+
+// Used only to recover from a failed WebGPU load (see canRetryWasm below).
+// onnxruntime-web memoizes session creation in a module-level promise it
+// never clears on failure, so a retry within the SAME worker would just
+// re-await that stale rejection and fail identically no matter what device
+// the retry asks for — a fresh worker is a fresh module registry, which is
+// the only way to actually get a clean second attempt.
+function resetWorker() {
+  if (worker) { try { worker.terminate(); } catch {} }
+  worker = null;
 }
 
 function pickDevice() {
@@ -2208,8 +2478,26 @@ function addTrack(name, filename, blob, seconds, { first = false, zipName = file
 // through this same worker, so a cached model carries over between them.
 let cancelled = false;
 let jobSeq = 0;
-let activeJob = null; // { jobId, resolve, reject, bookLabel, bookIndex, bookCount, flatPrefix, zipPrefix, docTitle, ext }
+let activeJob = null; // { jobId, resolve, reject, bookLabel, bookIndex, bookCount, flatPrefix, zipPrefix, docTitle, ext, sections, settings }
 let previewUrl = null;
+
+// Device/Precision are switched to the working combination and remembered,
+// so the next click — and, within a batch, every remaining book — goes
+// straight to WASM instead of repeating the same failed load every time.
+function fallbackToWasm(message) {
+  log(
+    "WebGPU couldn't load the voice model on this graphics hardware (" + message +
+    "); switching to WASM (CPU) instead."
+  );
+  els.device.value = "wasm";
+  if (els.dtype.value === "auto") els.dtype.value = "q8";
+  saveSettings();
+  // A fresh worker, not the one that just failed: onnxruntime-web memoizes
+  // session creation in a module-level promise it never clears on failure,
+  // so retrying in the same worker would just re-await that stale rejection
+  // and fail identically no matter what device this retry asks for.
+  resetWorker();
+}
 
 function onWorkerMessage(msg) {
   if (msg.evt === "modelProgress") {
@@ -2230,6 +2518,17 @@ function onWorkerMessage(msg) {
     els.previewAudio.src = previewUrl;
     els.previewAudio.classList.remove("hidden");
     els.previewAudio.play().catch(() => {}); // autoplay can be blocked; the controls still work
+    els.previewVoice.disabled = false;
+    els.previewVoice.textContent = "▶ Preview";
+    return;
+  }
+  if (msg.evt === "previewError") {
+    if (msg.canRetryWasm) {
+      fallbackToWasm(msg.message);
+      firePreview("wasm", "q8");
+      return;
+    }
+    fatal(msg.message);
     els.previewVoice.disabled = false;
     els.previewVoice.textContent = "▶ Preview";
     return;
@@ -2259,6 +2558,14 @@ function onWorkerMessage(msg) {
     return;
   }
   if (msg.evt === "done" || msg.evt === "cancelled" || msg.evt === "error") {
+    if (msg.evt === "error" && msg.canRetryWasm) {
+      fallbackToWasm(msg.message);
+      getWorker().postMessage({
+        cmd: "generate", jobId: job.jobId, sections: job.sections,
+        ...job.settings, device: "wasm", dtype: "q8",
+      });
+      return; // same job, same jobId — wait for the retried attempt's events
+    }
     activeJob = null;
     if (msg.evt === "error") job.reject(new Error(msg.message));
     else job.resolve(msg);
@@ -2266,7 +2573,10 @@ function onWorkerMessage(msg) {
 }
 
 // Resolves once this book's job finishes (or is cancelled); UI updates for
-// its events happen as a side effect of onWorkerMessage above.
+// its events happen as a side effect of onWorkerMessage above. sections and
+// settings are kept on the job (not just spread into the postMessage) so a
+// WebGPU failure can be retried verbatim on a fresh worker — see
+// fallbackToWasm and the "error" handling in onWorkerMessage above.
 function runGenerateJob(sections, settings, bookMeta) {
   return new Promise((resolve, reject) => {
     const jobId = ++jobSeq;
@@ -2275,21 +2585,26 @@ function runGenerateJob(sections, settings, bookMeta) {
       bookLabel: bookMeta.bookLabel, bookIndex: bookMeta.bookIndex, bookCount: bookMeta.bookCount,
       flatPrefix: bookMeta.flatPrefix, zipPrefix: bookMeta.zipPrefix,
       docTitle: settings.docTitle, ext: settings.format,
+      sections, settings,
     };
     getWorker().postMessage({ cmd: "generate", jobId, sections, ...settings });
   });
 }
 
+const PREVIEW_SAMPLE_TEXT = "This is what your audiobook will sound like.";
+function firePreview(device, dtype) {
+  getWorker().postMessage({
+    cmd: "preview", text: PREVIEW_SAMPLE_TEXT, voice: els.voice.value, speed: +els.speed.value || 1,
+    device, dtype,
+  });
+}
+
 els.previewVoice.addEventListener("click", () => {
   if (activeJob) return; // the worker is mid-book; wait rather than interleave with it
-  const sample = "This is what your audiobook will sound like.";
   els.previewVoice.disabled = true;
   els.previewVoice.textContent = "Loading…";
   const device = pickDevice();
-  getWorker().postMessage({
-    cmd: "preview", text: sample, voice: els.voice.value, speed: +els.speed.value || 1,
-    device, dtype: pickDtype(device),
-  });
+  firePreview(device, pickDtype(device));
 });
 
 async function generate() {
@@ -2321,8 +2636,12 @@ async function generate() {
   const voice = els.voice.value;
   const speed = +els.speed.value || 1;
   const fmt = els.format.value;
-  const device = pickDevice();
-  const dtype = pickDtype(device);
+  // Not const: a device that rejects the model (see fallbackToWasm and the
+  // "error" handling in onWorkerMessage) is swapped out after the first book
+  // finishes, so a batch's remaining books go straight to the working device
+  // instead of repeating the same failed load and fallback on every one.
+  let device = pickDevice();
+  let dtype = pickDtype(device);
   const t0 = performance.now();
 
   try {
@@ -2345,12 +2664,13 @@ async function generate() {
       }
 
       const bookSlug = slugify(bookTitle, "book-" + (bi + 1));
-      await runGenerateJob(sections, { voice, speed, format: fmt, device, dtype, docTitle: bookTitle }, {
+      const result = await runGenerateJob(sections, { voice, speed, format: fmt, device, dtype, docTitle: bookTitle }, {
         bookLabel: books.length > 1 ? `Book ${bi + 1}/${books.length} — ` : "",
         bookIndex: bi, bookCount: books.length,
         flatPrefix: books.length > 1 ? `${bookSlug}-` : "",
         zipPrefix: books.length > 1 ? `${bookSlug}/` : "",
       });
+      if (result?.device) { device = result.device; dtype = result.dtype || dtype; }
       if (cancelled) break;
     }
 
@@ -2435,7 +2755,9 @@ window.ZAB = {
   stripFrontMatter, tokenizeMarkdown, inlineToSpeech, tokensToSpeech,
   splitSections, mdToSpeech, slugify, decodeEntities, capLongRuns, MAX_RUN,
   MIN_SECTION_WORDS, wordCount, mergeShortSections, sectionsWithText,
+  WORDS_PER_MINUTE, splitLongSections,
   pdfPagesToMarkdown, pdfExtractPages, pdfToMarkdown, looksScanned,
+  isPrivateUse, codeRuns, digitPlan, decodePages, looksLetterspaced, rejoinSpacedText,
   bodySize, groupLines, lineText, normalizeGlyphs,
   itemGeometry, isUpright, repairLigatures, ligaturePlan, applyLigatures,
   pagePitch, furnitureCandidates,

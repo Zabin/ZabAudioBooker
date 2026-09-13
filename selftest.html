@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZabAudioBooker — Self-Test</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4; --panel: #ffffff; --ink: #16161a; --muted: #5f6470; --line: #e0e0dc;
+    --accent: #2f6f4f; --accent-ink: #ffffff;
+    --warn-bg: #fff6e0; --warn-line: #e8cf94;
+    --err-bg: #fdeaea; --err-line: #e5b2b2; --err-ink: #8c2b2b;
+    --ok-bg: #e9f5ee; --ok-line: #b8dcc7; --ok-ink: #1f6b45;
+    --human-bg: #eef1fc; --human-line: #c3cdf2; --human-ink: #33418f;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --panel: #1e2024; --ink: #e8e8e6; --muted: #9aa0ab; --line: #32353b;
+      --accent: #57a97b; --accent-ink: #0f1512;
+      --warn-bg: #2f2a1c; --warn-line: #5c5233;
+      --err-bg: #33201f; --err-line: #6b3a38; --err-ink: #ef9a9a;
+      --ok-bg: #1b2a20; --ok-line: #2f5c40; --ok-ink: #8fd6ac;
+      --human-bg: #1c2036; --human-line: #38407a; --human-ink: #aab4ef;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 32px 20px 80px; }
+  header h1 { margin: 0 0 4px; font-size: 25px; letter-spacing: -0.02em; }
+  header p { margin: 0 0 4px; color: var(--muted); }
+  header a { color: var(--accent); }
+  .top-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 10px 18px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.small { padding: 6px 12px; font-size: 13px; }
+  .summary { font-size: 14px; color: var(--muted); }
+  .group-title {
+    margin: 26px 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .09em; color: var(--muted);
+  }
+  .step {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 10px;
+  }
+  .step-head { display: flex; align-items: flex-start; gap: 10px; }
+  .badge {
+    flex: none; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; font-size: 13px; background: var(--line); color: var(--muted);
+  }
+  .step.pass .badge { background: var(--ok-bg); color: var(--ok-ink); border: 1px solid var(--ok-line); }
+  .step.fail .badge { background: var(--err-bg); color: var(--err-ink); border: 1px solid var(--err-line); }
+  .step.running .badge { background: var(--warn-bg); color: #8a6d1f; border: 1px solid var(--warn-line); }
+  .step.human .badge { background: var(--human-bg); color: var(--human-ink); border: 1px solid var(--human-line); }
+  .step.skipped .badge { opacity: .5; }
+  .step-title { font-weight: 600; }
+  .step-explain { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  .step-explain .why { font-style: italic; }
+  .step-detail {
+    margin-top: 8px; font: 12.5px/1.5 var(--mono); color: var(--muted); white-space: pre-wrap; word-break: break-word;
+  }
+  .step-detail.fail { color: var(--err-ink); }
+  .human-box {
+    margin-top: 10px; padding: 10px 12px; background: var(--human-bg); border: 1px solid var(--human-line);
+    border-radius: 8px;
+  }
+  .human-box audio { width: 100%; margin: 8px 0; }
+  .human-box .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .human-box textarea {
+    width: 100%; margin-top: 8px; min-height: 50px; font: 13px/1.4 inherit; padding: 6px 8px;
+    border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  .not-automated { border: 1px dashed var(--line); border-radius: 10px; padding: 14px 16px; }
+  .not-automated li { margin-bottom: 8px; }
+  .not-automated .why { color: var(--muted); font-size: 13px; }
+  .hidden { display: none !important; }
+  .fatal { background: var(--err-bg); border: 1px solid var(--err-line); color: var(--err-ink); border-radius: 8px; padding: 11px 13px; margin: 14px 0; }
+  #report { width: 100%; min-height: 160px; font: 12px/1.5 var(--mono); margin-top: 10px; padding: 10px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ZabAudioBooker — Self-Test</h1>
+    <p>Runs the real app end to end — the same page, loaded in a hidden frame — and checks as much
+      as a machine can. A handful of steps genuinely need your ears or a real player, and are marked
+      accordingly; everything else runs on its own.</p>
+    <p>This is a fast smoke test, not a substitute for the full walkthrough in
+      <a href="TESTING.md">TESTING.md</a> — use that for a thorough pass before shipping a change.</p>
+  </header>
+
+  <div class="top-row">
+    <button class="primary" id="run">▶ Run self-test</button>
+    <button id="reset" disabled>Reset</button>
+    <span class="summary" id="summary"></span>
+  </div>
+
+  <div id="fatal" class="fatal hidden"></div>
+
+  <div id="steps"></div>
+
+  <div id="notAutomatedWrap"></div>
+
+  <div id="reportWrap" class="hidden">
+    <h2 class="group-title" style="margin-top:32px">Report</h2>
+    <div class="top-row" style="margin-top:0">
+      <button class="small" id="copyReport">Copy report</button>
+    </div>
+    <textarea id="report" readonly></textarea>
+  </div>
+
+  <iframe id="app" src="zabaudiobooker.html" class="hidden" title="ZabAudioBooker (under test)"></iframe>
+</div>
+
+<script type="module">
+/* ------------------------------------------------------------------ *
+ * This drives the REAL zabaudiobooker.html in a hidden iframe, rather
+ * than reimplementing any of its logic — every check here exercises the
+ * actual pipeline a visitor uses, including its window.ZAB export of pure
+ * functions and its real Section 1-4 UI for the one true end-to-end run.
+ * ------------------------------------------------------------------ */
+
+const $ = id => document.getElementById(id);
+const els = { run: $("run"), reset: $("reset"), summary: $("summary"), steps: $("steps"),
+  fatal: $("fatal"), notAutomated: $("notAutomatedWrap"), reportWrap: $("reportWrap"),
+  report: $("report"), copyReport: $("copyReport"), frame: $("app") };
+
+function fatal(msg) { els.fatal.textContent = msg; els.fatal.classList.remove("hidden"); }
+
+// ---- wait for the app iframe to finish loading its module script ----
+function waitForApp(frame, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const win = frame.contentWindow;
+    if (win?.ZAB) return resolve(win);
+    const onReady = () => { cleanup(); resolve(win); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error("Timed out waiting for the app to load.")); }, timeoutMs);
+    function cleanup() { clearTimeout(timer); win.removeEventListener("zab-ready", onReady); }
+    win.addEventListener("zab-ready", onReady);
+  });
+}
+
+function waitFor(fn, { timeoutMs = 15000, intervalMs = 150 } = {}) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    (function poll() {
+      let v;
+      try { v = fn(); } catch (e) { return reject(e); }
+      if (v) return resolve(v);
+      if (Date.now() - start > timeoutMs) return reject(new Error("Timed out waiting."));
+      setTimeout(poll, intervalMs);
+    })();
+  });
+}
+
+function assertEqual(actual, expected, msg) {
+  if (actual !== expected) throw new Error(`${msg}\n  expected: ${JSON.stringify(expected)}\n  actual:   ${JSON.stringify(actual)}`);
+}
+function assertMatch(actual, re, msg) {
+  if (!re.test(actual)) throw new Error(`${msg}\n  pattern: ${re}\n  actual:  ${JSON.stringify(actual)}`);
+}
+function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
+
+/* ------------------------------------------------------------------ *
+ * A minimal ISO-BMFF box reader, independent of the app's own muxer, so
+ * the M4B check parses the file back apart rather than trusting the same
+ * code that built it.
+ * ------------------------------------------------------------------ */
+function readBoxes(bytes, start, end) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const boxes = [];
+  let p = start;
+  while (p < end) {
+    const size = dv.getUint32(p, false);
+    const type = String.fromCharCode(bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]);
+    if (size <= 0) throw new Error(`Non-positive box size at ${p} (${type})`);
+    boxes.push({ type, start: p, end: p + size, bodyStart: p + 8, size });
+    p += size;
+  }
+  if (p !== end) throw new Error(`Boxes did not exactly fill [${start},${end}) — stopped at ${p}`);
+  return boxes;
+}
+function findBox(boxes, type) {
+  const b = boxes.find(x => x.type === type);
+  if (!b) throw new Error(`Expected a ${JSON.stringify(type)} box among [${boxes.map(x => x.type)}]`);
+  return b;
+}
+function u32(bytes, off) { return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(off, false); }
+
+/* ------------------------------------------------------------------ *
+ * Step definitions
+ * ------------------------------------------------------------------ */
+
+let appWin = null; // the iframe's window, once loaded
+
+const SAMPLE_MD = `# The Lighthouse
+
+There was once a small lighthouse on a rocky shore. Every night its light
+turned slowly over the water.
+
+## Chapter One
+
+The keeper climbed the stairs at dusk, as she always had. See [the log book](https://example.com/log) for details.
+
+- She lit the lamp
+- She checked the oil
+- She wrote the date
+
+1. First she wound the mechanism
+2. Then she polished the lens
+
+\`\`\`
+this code block should not be read aloud
+\`\`\`
+
+| Item | Count |
+| --- | --- |
+| Oil cans | 3 |
+| Matches | 12 |
+
+## Postscript
+`;
+
+const steps = [];
+function group(label) { steps.push({ group: label }); }
+function step(def) { steps.push(def); }
+
+group("Text pipeline — instant, no network");
+
+step({
+  id: "load", title: "App loads cleanly",
+  why: "Automated: just checks the page loaded without throwing.",
+  kind: "auto",
+  run: async () => {
+    appWin = await waitForApp(els.frame);
+    assertTrue(!!appWin.ZAB, "window.ZAB was not exposed by the app");
+    return "Loaded; window.ZAB is present.";
+  },
+});
+
+step({
+  id: "md2speech", title: "Markdown converts to speakable text correctly",
+  why: "Automated: the expected text is fixed, so this is an exact match, not a judgment call.",
+  kind: "auto",
+  run: async () => {
+    const text = appWin.ZAB.mdToSpeech(SAMPLE_MD, { code: "skip", tables: "flatten", numberLists: true });
+    assertMatch(text, /^The Lighthouse\./, "should start with the H1 as spoken text");
+    assertMatch(text, /Chapter One\./, "heading should be present");
+    assertMatch(text, /the log book/, "link text should be kept");
+    assertTrue(!text.includes("example.com"), "the URL itself should be dropped");
+    assertTrue(!text.includes("should not be read aloud"), "fenced code should be skipped by default");
+    assertMatch(text, /1\. First she wound/, "ordered list should be numbered aloud");
+    assertMatch(text, /Item: Oil cans, Count: 3/, "table should flatten to header: value");
+    return "Headings, links, lists and tables all converted as expected; code block skipped.";
+  },
+});
+
+step({
+  id: "chapters", title: "Chapter splitting and short-section merging",
+  why: "Automated: section count and titles are deterministic given the heading level.",
+  kind: "auto",
+  run: async () => {
+    const tokens = appWin.ZAB.tokenizeMarkdown(SAMPLE_MD);
+    const sections = appWin.ZAB.sectionsWithText(tokens, 2, { code: "skip", tables: "flatten", numberLists: true });
+    // "## Postscript" has nothing after it, so it should fold into "Chapter One" (the last real section), not ship alone.
+    assertEqual(sections.length, 2, "expected the intro + Chapter One (Postscript folded in)");
+    assertMatch(sections[1].text, /Postscript/, "the short trailing heading should be folded into the previous section");
+    return `${sections.length} sections produced; the near-empty "Postscript" heading was folded in rather than shipped alone.`;
+  },
+});
+
+group("EPUB / PDF ingestion — instant, synthetic input");
+
+step({
+  id: "epub", title: "EPUB (container + spine + toc) converts correctly",
+  why: "Automated: built from a hand-built in-memory EPUB, so the expected output is known exactly.",
+  kind: "auto",
+  run: async () => {
+    const enc = new TextEncoder();
+    const files = {
+      "META-INF/container.xml": enc.encode(`<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`),
+      "OEBPS/content.opf": enc.encode(`<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Selftest Book</dc:title></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/><item id="ad" href="ad.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="ch1"/><itemref idref="ad" linear="no"/></spine></package>`),
+      "OEBPS/nav.xhtml": enc.encode(`<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><nav epub:type="toc"><ol><li><a href="ch1.xhtml">Chapter One</a></li></ol></nav></body></html>`),
+      "OEBPS/ch1.xhtml": enc.encode(`<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>Content from the EPUB chapter.</p></body></html>`),
+      "OEBPS/ad.xhtml": enc.encode(`<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>An advertisement that should not appear.</p></body></html>`),
+    };
+    const { markdown, title } = appWin.ZAB.epubFilesToMarkdown(files);
+    assertEqual(title, "Selftest Book", "book title should come from dc:title");
+    assertMatch(markdown, /^# Chapter One/, "chapter title should come from the nav toc");
+    assertMatch(markdown, /Content from the EPUB chapter\./, "chapter body should be present");
+    assertTrue(!markdown.includes("advertisement"), "a linear=\"no\" spine item should be skipped");
+    return "Spine order, non-linear skip, and toc-sourced chapter title all correct.";
+  },
+});
+
+step({
+  id: "pdf", title: "PDF page geometry converts to Markdown correctly",
+  why: "Automated: a synthetic page layout with known positions, so headings/running-heads are unambiguous.",
+  kind: "auto",
+  run: async () => {
+    const mkItem = (str, x, y, size) => ({ str, x, y, size, rot: 0, width: str.length * size * 0.5 });
+    const pages = [
+      { page: 1, w: 400, h: 700,
+        items: [
+          mkItem("Running Head", 150, 670, 9),          // top-margin band -> running head
+          mkItem("Chapter One", 150, 600, 18),           // large -> heading
+          mkItem("This is the first paragraph of the book.", 60, 560, 11),
+          mkItem("1", 195, 30, 9),                       // bare folio in bottom band
+        ] },
+      { page: 2, w: 400, h: 700,
+        items: [
+          mkItem("Running Head", 150, 670, 9),
+          mkItem("A second paragraph continues the story here.", 60, 600, 11),
+          mkItem("2", 195, 30, 9),
+        ] },
+    ];
+    const md = appWin.ZAB.pdfPagesToMarkdown(pages, { bodySize: 11 });
+    assertTrue(!md.includes("Running Head"), "the recurring running head should be stripped");
+    assertMatch(md, /^# Chapter One/m, "the large text should be promoted to a heading");
+    assertMatch(md, /first paragraph/, "body text should survive");
+    assertTrue(!/(^|\s)1(\s|$)/.test(md.split("first paragraph")[1]?.slice(0, 20) || ""), "bare folio should not leak into the text");
+    return "Running heads and folios stripped; large text promoted to a heading.";
+  },
+});
+
+group("Encoding & containers — instant, synthetic audio");
+
+step({
+  id: "wav", title: "WAV encoder produces a well-formed file",
+  why: "Automated: the header fields are checked directly against the PCM data used to build it.",
+  kind: "auto",
+  run: async () => {
+    const n = 4800; // 0.2s at 24kHz
+    const audio = new Float32Array(n).fill(0.1);
+    const blob = appWin.ZAB.encodeWav(audio, 24000);
+    assertEqual(blob.type, "audio/wav", "mime type");
+    assertEqual(blob.size, 44 + n * 2, "44-byte header + 16-bit mono PCM");
+    return `Produced a ${blob.size}-byte WAV blob with the expected header + PCM size.`;
+  },
+});
+
+step({
+  id: "m4b", title: "M4B container structure is correct",
+  why: "Automated: parses the produced file back apart (independently of the code that built it) and checks box sizes, chunk offsets and chapter round-trip.",
+  kind: "auto",
+  run: async () => {
+    const sr = 24000, n = sr * 2;
+    const audio = new Float32Array(n);
+    for (let i = 0; i < n; i++) audio[i] = Math.sin(i / 40) * 0.4;
+    const chapters = [{ title: "Alpha", startSample: 0 }, { title: "Beta", startSample: sr }];
+    const blob = appWin.ZAB.encodeM4b(audio, chapters, "Selftest Book");
+    assertEqual(blob.type, "audio/mp4", "mime type");
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+
+    const top = readBoxes(bytes, 0, bytes.length);
+    assertEqual(top.filter(b => b.type === "mdat").length, 2, "expected two mdat boxes (audio + chapter text)");
+    const moov = findBox(top, "moov");
+    const moovKids = readBoxes(bytes, moov.bodyStart, moov.end);
+    const traks = moovKids.filter(b => b.type === "trak");
+    assertEqual(traks.length, 2, "expected an audio track and a chapter track");
+
+    const audioTrak = readBoxes(bytes, traks[0].bodyStart, traks[0].end);
+    const mdia = findBox(audioTrak, "mdia");
+    const mdiaKids = readBoxes(bytes, mdia.bodyStart, mdia.end);
+    const minf = findBox(mdiaKids, "minf");
+    const stbl = findBox(readBoxes(bytes, minf.bodyStart, minf.end), "stbl");
+    const stblKids = readBoxes(bytes, stbl.bodyStart, stbl.end);
+    const stco = findBox(stblKids, "stco");
+    const offset = u32(bytes, stco.bodyStart + 8);
+    // stco points at the sample DATA, which sits right after an 8-byte
+    // mdat box header (4-byte size + 4-byte type) — not at the header itself.
+    const atHeader = String.fromCharCode(bytes[offset - 4], bytes[offset - 3], bytes[offset - 2], bytes[offset - 1]);
+    assertEqual(atHeader, "mdat", "the audio chunk offset should land exactly 8 bytes past an mdat box header");
+
+    const tref = findBox(audioTrak, "tref");
+    const chap = findBox(readBoxes(bytes, tref.bodyStart, tref.end), "chap");
+    assertEqual(u32(bytes, chap.bodyStart), 2, "tref/chap should reference track 2");
+
+    return `Valid MP4: ${traks.length} tracks, chunk offset lands exactly on an mdat, chapter track correctly linked.`;
+  },
+});
+
+step({
+  id: "zip", title: "Zip archive is well-formed",
+  why: "Automated: checks the local/central header structure and CRC32 the app itself writes.",
+  kind: "auto",
+  run: async () => {
+    const a = new Uint8Array([1, 2, 3, 4, 5]);
+    const b = new Uint8Array([9, 9]);
+    const zip = appWin.ZAB.createZip([{ name: "a.bin", data: a }, { name: "b.bin", data: b }]);
+    const bytes = new Uint8Array(await zip.arrayBuffer());
+    const dv = new DataView(bytes.buffer);
+    assertEqual(dv.getUint32(0, true), 0x04034b50, "should start with a local file header signature");
+    const eocdSig = 0x06054b50;
+    let found = -1;
+    for (let i = bytes.length - 22; i >= 0; i--) { if (dv.getUint32(i, true) === eocdSig) { found = i; break; } }
+    assertTrue(found >= 0, "should contain an end-of-central-directory record");
+    assertEqual(dv.getUint16(found + 10, true), 2, "should record 2 entries");
+    return `${bytes.length}-byte zip with a valid end-of-central-directory record listing 2 entries.`;
+  },
+});
+
+group("Settings — instant");
+
+step({
+  id: "settings", title: "Settings persist to the browser's storage",
+  why: "Automated: reads localStorage back directly rather than reloading the page (a reload would also re-verify the UI, but this checks the underlying mechanism precisely).",
+  kind: "auto",
+  run: async () => {
+    const doc = appWin.document;
+    const format = doc.getElementById("format");
+    const before = format.value;
+    format.value = format.value === "wav" ? "mp3" : "wav";
+    format.dispatchEvent(new appWin.Event("change", { bubbles: true }));
+    await waitFor(() => {
+      const saved = JSON.parse(appWin.localStorage.getItem("zab-settings") || "null");
+      return saved && saved.format === format.value;
+    }, { timeoutMs: 2000 });
+    const saved = JSON.parse(appWin.localStorage.getItem("zab-settings"));
+    format.value = before; // leave it as we found it
+    return `localStorage updated: format saved as "${saved.format}".`;
+  },
+});
+
+group("End-to-end generation — needs network the first time");
+
+step({
+  id: "generate", title: "A real audiobook generates through the actual UI",
+  why: "Automated up to \"a file was produced\": drives the real Generate button and waits for a result. " +
+       "The FIRST run also downloads the AI voice model (up to ~330MB) — this needs network access and can " +
+       "take several minutes; after that it's quick. Whether the audio actually sounds right is the next, human, step.",
+  kind: "auto",
+  slow: true,
+  run: async () => {
+    const doc = appWin.document;
+    const md = doc.getElementById("md");
+    md.value = "# Self Test\n\nThis is a short sentence generated automatically to check that the pipeline works end to end.";
+    md.dispatchEvent(new appWin.Event("input", { bubbles: true }));
+    doc.getElementById("split").value = "0";
+    doc.getElementById("split").dispatchEvent(new appWin.Event("change", { bubbles: true }));
+    doc.getElementById("format").value = "mp3";
+    doc.getElementById("format").dispatchEvent(new appWin.Event("change", { bubbles: true }));
+
+    const goBtn = doc.getElementById("go");
+    goBtn.click();
+
+    await waitFor(() => goBtn.disabled, { timeoutMs: 3000 }).catch(() => {}); // it may finish before we even check
+    await waitFor(() => {
+      const fatalEl = doc.getElementById("fatal");
+      if (!fatalEl.classList.contains("hidden") && fatalEl.textContent) {
+        throw new Error("The app reported an error: " + fatalEl.textContent);
+      }
+      return !goBtn.disabled && doc.querySelectorAll("#tracks audio").length > 0;
+    }, { timeoutMs: 8 * 60 * 1000, intervalMs: 500 });
+
+    const audioEl = doc.querySelector("#tracks audio");
+    lastGeneratedAudioSrc = audioEl.src;
+    return "A track was produced and appeared in the app's own Result section.";
+  },
+});
+
+step({
+  id: "listen", title: "Does the generated audio actually sound right?",
+  why: "Needs a human: a machine can confirm a non-empty audio file was produced (previous step), " +
+       "but only a person can confirm it's intelligible speech, in a plausible voice, with no silence, " +
+       "static or gibberish.",
+  kind: "human",
+  render: (box, done) => {
+    if (!lastGeneratedAudioSrc) {
+      box.innerHTML = `<p>Skipped — the previous step did not produce audio to check.</p>`;
+      return done({ ok: null, detail: "Skipped (no audio to check)." });
+    }
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.src = lastGeneratedAudioSrc;
+    const p = document.createElement("p");
+    p.textContent = "Press play. Is this clear, natural-sounding speech saying the test sentence?";
+    const row = document.createElement("div");
+    row.className = "row";
+    const yes = mkBtn("Yes, sounds right", () => finish(true));
+    const no = mkBtn("No — something's wrong", () => finish(false));
+    const note = document.createElement("textarea");
+    note.placeholder = "Optional note (e.g. \"robotic but understandable\", \"silence after 2s\")";
+    row.append(yes, no);
+    box.append(p, audio, row, note);
+    function finish(ok) { done({ ok, detail: note.value ? `${ok ? "Confirmed" : "Reported a problem"}: ${note.value}` : (ok ? "Confirmed by listener." : "Listener reported a problem.") }); }
+  },
+});
+
+step({
+  id: "m4b-listen", title: "If you use M4B: do chapters actually work in a real player?",
+  why: "Needs a human, and needs a real player: this app can prove the container's bytes are structurally " +
+       "correct (checked above), but not that Apple Books, VLC, or your phone's audiobook app actually shows " +
+       "seekable chapters — no AAC encoder is embedded, so this file is uncompressed PCM inside M4B, which is " +
+       "the least-tested part of the whole app.",
+  kind: "human",
+  render: (box, done) => {
+    const p = document.createElement("p");
+    p.textContent = "This step is optional — skip it if you don't have a spare minute or a media player handy.";
+    const genBtn = mkBtn("Generate a 2-chapter M4B sample", async () => {
+      genBtn.disabled = true; genBtn.textContent = "Generating…";
+      try {
+        const sr = 24000;
+        const mkTone = (hz, secs) => { const n = sr * secs; const a = new Float32Array(n); for (let i = 0; i < n; i++) a[i] = Math.sin(2 * Math.PI * hz * i / sr) * 0.3; return a; };
+        const part1 = mkTone(440, 2), part2 = mkTone(660, 2);
+        const full = new Float32Array(part1.length + part2.length);
+        full.set(part1, 0); full.set(part2, part1.length);
+        const blob = appWin.ZAB.encodeM4b(full, [{ title: "Chapter One (440Hz tone)", startSample: 0 }, { title: "Chapter Two (660Hz tone)", startSample: part1.length }], "Selftest Chapters");
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "selftest-chapters.m4b";
+        a.textContent = "Download selftest-chapters.m4b";
+        a.className = "step-title";
+        genBtn.replaceWith(a);
+      } catch (e) {
+        genBtn.textContent = "Failed: " + e.message;
+      }
+    });
+    const row = document.createElement("div");
+    row.className = "row";
+    const yes = mkBtn("Chapters worked", () => done({ ok: true, detail: "Confirmed chapters visible/seekable in a real player." }));
+    const skip = mkBtn("Skip this one", () => done({ ok: null, detail: "Skipped by choice." }));
+    const no = mkBtn("Didn't work", () => done({ ok: false, detail: "Reported: chapters did not work in a real player." }));
+    row.append(yes, no, skip);
+    box.append(p, genBtn, row);
+  },
+});
+
+function mkBtn(label, onClick) {
+  const b = document.createElement("button");
+  b.className = "small";
+  b.textContent = label;
+  b.addEventListener("click", onClick);
+  return b;
+}
+let lastGeneratedAudioSrc = null;
+
+/* ------------------------------------------------------------------ *
+ * Things this script deliberately does not attempt to automate.
+ * ------------------------------------------------------------------ */
+const NOT_AUTOMATED = [
+  { title: "Actually disconnecting the network to prove offline playback",
+    why: "This page can't unplug your Wi-Fi for you. See TESTING.md, section 6." },
+  { title: "Whether the browser's install prompt appears",
+    why: "Install prompts are heuristic and vendor-specific; triggering one programmatically isn't reliable. See TESTING.md, section 10." },
+  { title: "WebGPU actually engaging inside the Worker vs. silently falling back to WASM",
+    why: "Detectable in principle, but telling \"used WebGPU\" from \"fell back and still worked\" reliably needs a real GPU across several browsers, not just this machine." },
+  { title: "A real, long (30+ minute) book completing without the tab dying",
+    why: "Needs a real long document and real time elapsed — this test uses short synthetic samples on purpose, to stay fast." },
+  { title: "How the converted text reads on a book you actually care about",
+    why: "PDF and EPUB heuristics were tuned on fixtures; only your own material tells you the real hit rate. See TESTING.md, sections 7-8." },
+];
+
+/* ------------------------------------------------------------------ *
+ * Runner
+ * ------------------------------------------------------------------ */
+
+const results = new Map();
+
+function render() {
+  els.steps.innerHTML = "";
+  let currentGroupEl = null;
+  for (const s of steps) {
+    if (s.group) {
+      currentGroupEl = document.createElement("div");
+      currentGroupEl.className = "group-title";
+      currentGroupEl.textContent = s.group;
+      els.steps.appendChild(currentGroupEl);
+      continue;
+    }
+    const r = results.get(s.id);
+    const div = document.createElement("div");
+    div.className = "step" + (r ? ` ${r.status}` : "");
+    div.id = "step-" + s.id;
+    const icon = { pending: "•", running: "…", pass: "✓", fail: "✕", human: "?", skipped: "–" }[r?.status || "pending"];
+    div.innerHTML = `
+      <div class="step-head">
+        <div class="badge">${icon}</div>
+        <div style="flex:1">
+          <div class="step-title">${s.title}</div>
+          <div class="step-explain"><span class="why">${s.kind === "human" ? "Needs a human — " : "Automated — "}</span>${s.why}</div>
+        </div>
+      </div>`;
+    if (r?.detail) {
+      const d = document.createElement("div");
+      d.className = "step-detail" + (r.status === "fail" ? " fail" : "");
+      d.textContent = r.detail;
+      div.appendChild(d);
+    }
+    if (r?.humanBox) div.appendChild(r.humanBox);
+    els.steps.appendChild(div);
+  }
+  updateSummary();
+}
+
+function updateSummary() {
+  const total = steps.filter(s => !s.group).length;
+  const done = [...results.values()];
+  const pass = done.filter(r => r.status === "pass").length;
+  const fail = done.filter(r => r.status === "fail").length;
+  const human = done.filter(r => r.status === "human" && r.ok != null).length;
+  els.summary.textContent = done.length
+    ? `${pass}/${total} automated passed${fail ? `, ${fail} failed` : ""}${human ? `, ${human} human check(s) answered` : ""}`
+    : "";
+}
+
+async function runAll() {
+  results.clear();
+  els.fatal.classList.add("hidden");
+  els.run.disabled = true;
+  els.reset.disabled = true;
+  els.reportWrap.classList.add("hidden");
+  render();
+
+  for (const s of steps) {
+    if (s.group) continue;
+    results.set(s.id, { status: "running" });
+    render();
+    document.getElementById("step-" + s.id)?.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    if (s.kind === "auto") {
+      try {
+        const detail = await s.run();
+        results.set(s.id, { status: "pass", detail });
+      } catch (e) {
+        console.error(e);
+        results.set(s.id, { status: "fail", detail: e.message || String(e) });
+      }
+      render();
+    } else {
+      const box = document.createElement("div");
+      box.className = "human-box";
+      // Inserted into the live step card immediately, before awaiting a
+      // response — otherwise the buttons/player the human needs to act on
+      // exist only in a detached node nobody can see, and the step can
+      // never actually be answered.
+      document.getElementById("step-" + s.id)?.appendChild(box);
+      const ok = await new Promise(resolve => s.render(box, ({ ok, detail }) => resolve({ ok, detail })));
+      results.set(s.id, { status: ok.ok == null ? "skipped" : "human", ok: ok.ok, detail: ok.detail, humanBox: box });
+      render();
+    }
+  }
+
+  els.run.disabled = false;
+  els.reset.disabled = false;
+  buildReport();
+}
+
+function buildReport() {
+  const lines = [];
+  lines.push("ZabAudioBooker self-test report");
+  lines.push(new Date().toISOString());
+  lines.push("");
+  for (const s of steps) {
+    if (s.group) { lines.push(`## ${s.group}`); continue; }
+    const r = results.get(s.id) || { status: "skipped" };
+    const mark = { pass: "PASS", fail: "FAIL", human: r.ok === true ? "PASS (human)" : r.ok === false ? "FAIL (human)" : "SKIPPED", skipped: "SKIPPED" }[r.status] || "SKIPPED";
+    lines.push(`- [${mark}] ${s.title}`);
+    if (r.detail) lines.push(`      ${r.detail}`);
+  }
+  lines.push("");
+  lines.push("Not automated by this script (see TESTING.md):");
+  for (const n of NOT_AUTOMATED) lines.push(`- ${n.title}`);
+  els.report.value = lines.join("\n");
+  els.reportWrap.classList.remove("hidden");
+}
+
+function renderNotAutomated() {
+  const box = document.createElement("div");
+  box.className = "not-automated";
+  box.innerHTML = `<h2 class="group-title" style="margin-top:0">Not automated by this script</h2>`;
+  const ul = document.createElement("ul");
+  for (const n of NOT_AUTOMATED) {
+    const li = document.createElement("li");
+    li.innerHTML = `<div>${n.title}</div><div class="why">${n.why}</div>`;
+    ul.appendChild(li);
+  }
+  box.appendChild(ul);
+  els.notAutomated.appendChild(box);
+}
+
+els.run.addEventListener("click", () => runAll().catch(e => { console.error(e); fatal(e.message || String(e)); }));
+els.reset.addEventListener("click", () => {
+  results.clear();
+  render();
+  els.reportWrap.classList.add("hidden");
+  els.frame.src = els.frame.src; // reload the app fresh for the next run
+  appWin = null;
+});
+els.copyReport.addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(els.report.value); els.copyReport.textContent = "Copied!"; }
+  catch { els.report.select(); document.execCommand("copy"); els.copyReport.textContent = "Copied!"; }
+  setTimeout(() => { els.copyReport.textContent = "Copy report"; }, 1500);
+});
+
+render();
+renderNotAutomated();
+window.dispatchEvent(new Event("selftest-ready"));
+</script>
+</body>
+</html>

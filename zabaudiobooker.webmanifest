@@ -1,0 +1,14 @@
+{
+  "name": "ZabAudioBooker",
+  "short_name": "ZabAudioBooker",
+  "description": "Turn a Markdown, EPUB or PDF file into a chaptered audiobook, entirely in your browser.",
+  "start_url": "./zabaudiobooker.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f6f4",
+  "theme_color": "#2f6f4f",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

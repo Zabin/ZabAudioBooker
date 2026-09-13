@@ -30,9 +30,14 @@ You should see a page headed "ZabAudioBooker" with four numbered sections.
 
 ## Step 3: Make your first audiobook
 
-1. **Section 1 — Markdown.** Drag a `.md` or `.pdf` file onto the dotted box, or
-   click the box to browse for one. You can also type or paste text directly
-   into the large box underneath.
+1. **Section 1 — Markdown.** Drag a `.md`, `.epub` or `.pdf` file onto the
+   dotted box, or click the box to browse for one. You can also type or paste
+   text directly into the large box underneath.
+
+   **Dropping an EPUB** converts its chapters to Markdown automatically, in
+   the right order, using the book's own chapter titles where it has them.
+   This is much more reliable than a PDF, since an EPUB actually has chapters
+   to begin with rather than just positioned text on a page.
 
    **Dropping a PDF** converts it to Markdown first and puts the result in the
    box. Read it before you generate anything. Running heads, page numbers,
@@ -41,6 +46,11 @@ You should see a page headed "ZabAudioBooker" with four numbered sections.
    box is editable precisely so you can fix it. Two-column PDFs come out
    scrambled, and scanned PDFs are refused with an explanation because they
    contain no text at all.
+
+   **Dropping several files at once** (or adding one, then dropping another
+   later) queues them up as a batch instead of loading straight into the box —
+   see [Making several audiobooks at once](#making-several-audiobooks-at-once)
+   below.
 
    No Markdown file handy? Paste this in to try it out:
 
@@ -60,7 +70,12 @@ You should see a page headed "ZabAudioBooker" with four numbered sections.
 
 3. **Section 2 — Voice & output.** The defaults are fine for a first run.
    You can change the voice if you like; `af_heart` is a good American female
-   voice, `bm_george` a British male one.
+   voice, `bm_george` a British male one. Click **▶ Preview** to hear a short
+   sample in the current voice before committing to a whole book — the first
+   preview downloads the same voice model a full run would.
+
+   Whatever you set here — voice, speed, format and the rest — is remembered
+   for next time you open the page.
 
 4. **Section 3 — Generate.** Before clicking anything, expand
    **"Preview the text that will be spoken"**. This shows you exactly what the
@@ -99,13 +114,32 @@ else — everything comes out into a single `.zip` you can open normally.
 
 ---
 
+## Making several audiobooks at once
+
+Drop more than one file onto the box in one go, or drop a second file after
+you've already loaded one — either way, a list appears above the text box
+instead of the file loading straight in. Each entry shows its name and
+whether it's still converting, ready, or hit an error.
+
+Click an item in the list to check or fix its text before generating, the
+same way you would with a single PDF or EPUB. The `×` next to an item
+removes it from the list; if you remove all but one, the list disappears and
+you're back to the normal single-document view.
+
+With two or more queued, the **Generate audiobook** button changes to
+**Generate N audiobooks**. Click it once and it works through the whole list
+using whatever voice, speed and format you've set, one book after another —
+the model only downloads once, at the start, not once per book. Section 4
+lists each book's tracks under its own heading, and **Download every file** /
+**Download all as .zip** both cover everything in the batch.
+
 ## Every setting explained
 
 | Setting | What it does |
 | --- | --- |
 | **Voice** | Which voice reads the text. The letters mean accent and gender: `af_` = American female, `am_` = American male, `bf_` = British female, `bm_` = British male. |
 | **Speed** | `1` is normal. `1.15` is a common audiobook speed. Below `0.8` or above `1.5` starts to sound unnatural. |
-| **Format** | **MP3** for anything long — an hour is about 60 MB. **WAV** is uncompressed and much bigger (about 170 MB per hour), only worth it if you plan to edit the audio. |
+| **Format** | **MP3** for anything long — an hour is about 60 MB. **WAV** is uncompressed and much bigger (about 170 MB per hour), only worth it if you plan to edit the audio. **M4B** is one file with chapters built in, the format most audiobook apps expect — but it's uncompressed too (same size as WAV), and it never makes separate chapter files, only the one combined book. |
 | **Split into chapters at** | Where to cut the book into separate files. `Heading 2 (##)` suits most documents. Choose *Don't split* for one single file. A heading with almost nothing after it — a title page, a bare section divider — is folded into the next real chapter automatically, so you don't end up with a pile of one- or two-second files. |
 | **Device** | Leave on **Auto**. It uses your graphics card if your browser offers one, otherwise the processor. |
 | **Precision** | Leave on **Auto**. Lower precision (`q8`) means a smaller download and faster running; higher (`fp32`) means slightly better audio. |
@@ -138,6 +172,12 @@ python3 -m http.server 8000  # needs Python; already present on most Macs and Li
 Neither is a dependency of the tool itself — they are just two common ways to
 put a folder on `http://localhost` for a moment.
 
+Serving the folder this way also lets the browser offer to **install**
+ZabAudioBooker as an app (an icon in the address bar, or "Install…" in the
+browser menu). Installed, it opens in its own window and works with no
+internet connection at all — the app itself, that is; generating still needs
+the model downloaded at least once, same as always.
+
 ### Starting over
 
 To reclaim the space the downloaded model takes, clear your browser's site data
@@ -156,3 +196,5 @@ site data**, then remove the entry). It will download again next time.
 | **WASM** | WebAssembly — the fallback that runs the model on your processor when WebGPU is not available. |
 | **RTF** | Real-Time Factor. How long it takes to make audio versus the length of that audio. Lower is faster; `0.05x` is 20 times faster than real time. |
 | **Markdown** (`.md`) | A plain-text format where `#` marks a heading and `**bold**` marks bold text. |
+| **EPUB** (`.epub`) | The common ebook file format — really a zip file full of chapter pages plus a table of contents. |
+| **M4B** | An audiobook file format: one file with chapter markers built in, so a player can jump between chapters and remember where you stopped. |

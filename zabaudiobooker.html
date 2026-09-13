@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ZabAudioBooker — Markdown to Audiobook</title>
+<link rel="manifest" href="zabaudiobooker.webmanifest">
+<meta name="theme-color" content="#2f6f4f">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
 <style>
   :root {
     color-scheme: light dark;
@@ -147,6 +151,24 @@
   a.dl { font-size: 13px; color: var(--accent); text-decoration: none; font-weight: 600; }
   a.dl:hover { text-decoration: underline; }
   .hidden { display: none !important; }
+  .queue { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .queue-item {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+    border-top: 1px solid var(--line); cursor: pointer; font-size: 13.5px;
+  }
+  .queue-item:first-child { border-top: 0; }
+  .queue-item:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .queue-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .queue-item .qname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-item .qstatus { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .queue-item .qrm {
+    border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 15px;
+    line-height: 1; padding: 2px 4px; border-radius: 4px;
+  }
+  .queue-item .qrm:hover { background: var(--err-bg); color: var(--err-ink); }
+  button.small { padding: 6px 10px; font-size: 13px; font-weight: 500; }
+  h3.book-divider { margin: 20px 0 4px; font-size: 13px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 14px; }
+  .track:has(+ h3.book-divider) { border-bottom: 0; }
 </style>
 </head>
 <body>
@@ -168,9 +190,13 @@
   <section>
     <h2>1 · Markdown</h2>
     <div class="drop" id="drop">
-      <strong>Drop a .md or .pdf file here</strong> or click to choose one — you can also paste below.
+      <strong>Drop a .md, .epub or .pdf file here</strong> or click to choose one — you can also paste
+      below. Drop several at once to queue up a batch.
     </div>
-    <input type="file" id="file" accept=".md,.markdown,.mdown,.mkd,.txt,.pdf,text/markdown,text/plain,application/pdf" class="hidden">
+    <input type="file" id="file" multiple
+      accept=".md,.markdown,.mdown,.mkd,.txt,.epub,.pdf,text/markdown,text/plain,application/epub+zip,application/pdf"
+      class="hidden">
+    <div class="queue hidden" id="queue"></div>
     <textarea id="md" placeholder="# Chapter One&#10;&#10;Or paste your Markdown straight in here."></textarea>
     <div class="stats" id="stats"></div>
   </section>
@@ -180,7 +206,11 @@
     <div class="grid">
       <div>
         <label for="voice">Voice</label>
-        <select id="voice"></select>
+        <div class="row" style="gap:8px; flex-wrap:nowrap">
+          <select id="voice" style="flex:1"></select>
+          <button type="button" id="previewVoice" class="small" title="Hear a short sample in this voice">▶ Preview</button>
+        </div>
+        <audio id="previewAudio" class="hidden" controls preload="none" style="width:100%; height:30px; margin-top:6px"></audio>
       </div>
       <div>
         <label for="speed">Speed</label>
@@ -191,6 +221,7 @@
         <select id="format">
           <option value="mp3">MP3 — 128 kbps</option>
           <option value="wav">WAV — 24 kHz PCM</option>
+          <option value="m4b">M4B — chapters, uncompressed</option>
         </select>
       </div>
       <div>
@@ -271,6 +302,7 @@ const SAMPLE_RATE = 24000;
 const MODEL_ID    = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const KOKORO_URL  = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm";
 const LAMEJS_URL  = "https://cdn.jsdelivr.net/npm/@breezystack/lamejs@1.2.7/+esm";
+const FFLATE_URL  = "https://cdn.jsdelivr.net/npm/fflate@0.8.2/+esm";
 
 /* ------------------------------------------------------------------ *
  * Markdown -> speech text.
@@ -950,6 +982,273 @@ async function pdfToMarkdown(bytes, onProgress) {
 }
 
 /* ------------------------------------------------------------------ *
+ * EPUB -> Markdown.
+ *
+ * An EPUB is a zip of XHTML content documents plus an OPF package file
+ * naming them in reading order (the spine) and, usually, a nav/NCX table of
+ * contents naming them. Unzipping needs an inflate implementation this
+ * project doesn't hand-roll (unlike the STORE-only zip it writes for
+ * downloads, below), so that part goes through a CDN library the same way
+ * MP3 encoding and PDF parsing already do; everything else here is pure,
+ * taking the plain {path: Uint8Array} map that library hands back.
+ *
+ * Each content document is converted to Markdown and re-enters the SAME
+ * Markdown -> speech pipeline used for a dropped .md file, so chapter
+ * splitting and every Section 2 setting behave identically regardless of
+ * source format.
+ * ------------------------------------------------------------------ */
+
+const HTML_BLOCK_TAGS = new Set([
+  "p", "div", "section", "article", "header", "footer", "figure", "figcaption",
+  "blockquote", "ul", "ol", "li", "table", "tr", "pre", "hr",
+  "h1", "h2", "h3", "h4", "h5", "h6",
+]);
+
+function escapeMdText(s) { return s.replace(/[\\`*_[\]]/g, "\\$&"); }
+function collapseSpace(s) { return s.replace(/[ \t\r\n\f]+/g, " "); }
+
+// Inline content of a node (text, emphasis, links, images, code) rendered as
+// a single line of Markdown suitable for a paragraph/heading/list item.
+function inlineMarkdown(node) {
+  let out = "";
+  for (const child of node.childNodes) {
+    if (child.nodeType === 3) { out += escapeMdText(collapseSpace(child.textContent)); continue; }
+    if (child.nodeType !== 1) continue;
+    const tag = child.tagName.toLowerCase();
+    if (tag === "br") { out += "\n"; continue; }
+    if (tag === "img") { out += `![${child.getAttribute("alt") || ""}](#)`; continue; }
+    if (tag === "code") { out += "`" + child.textContent.replace(/`/g, "") + "`"; continue; }
+    if (tag === "a") { const inner = inlineMarkdown(child).trim(); out += inner ? `[${inner}](#)` : ""; continue; }
+    if (tag === "strong" || tag === "b") { out += `**${inlineMarkdown(child)}**`; continue; }
+    if (tag === "em" || tag === "i") { out += `*${inlineMarkdown(child)}*`; continue; }
+    if (tag === "sup" || tag === "sub") { out += inlineMarkdown(child); continue; }
+    if (HTML_BLOCK_TAGS.has(tag)) continue; // handled at the block level, not inline
+    out += inlineMarkdown(child);
+  }
+  return out;
+}
+
+function headingLevel(tag) { const m = /^h([1-6])$/.exec(tag); return m ? +m[1] : 0; }
+
+// Walks block-level content and emits Markdown blocks, blank-line separated.
+function blockMarkdown(node, out) {
+  for (const child of node.childNodes) {
+    if (child.nodeType !== 1) continue;
+    const tag = child.tagName.toLowerCase();
+    if (tag === "script" || tag === "style" || tag === "nav") continue;
+
+    // An EPUB cover/title page is often just an <img>; give it a heading-free
+    // paragraph so mergeShortSections can fold it into whatever follows,
+    // exactly as it already does for a PDF title page.
+    if (tag === "img" && node === child.parentNode) {
+      const alt = child.getAttribute("alt");
+      if (alt) out.push(escapeMdText(collapseSpace(alt)));
+      continue;
+    }
+
+    const lvl = headingLevel(tag);
+    if (lvl) { const text = inlineMarkdown(child).trim(); if (text) out.push("#".repeat(lvl) + " " + text); continue; }
+    if (tag === "hr") { out.push("---"); continue; }
+
+    if (tag === "blockquote") {
+      const inner = [];
+      blockMarkdown(child, inner);
+      out.push(inner.join("\n\n").split("\n").map(l => "> " + l).join("\n"));
+      continue;
+    }
+
+    if (tag === "pre") {
+      const code = child.querySelector ? child.querySelector("code") : null;
+      out.push("```\n" + (code || child).textContent.replace(/\n+$/, "") + "\n```");
+      continue;
+    }
+
+    if (tag === "ul" || tag === "ol") {
+      const ordered = tag === "ol";
+      const items = [...child.children].filter(li => li.tagName.toLowerCase() === "li");
+      const lines = items
+        .map((li, i) => (ordered ? `${i + 1}. ` : "- ") + inlineMarkdown(li).trim())
+        .filter(l => l.replace(/^[-\d.]+\s*/, "").trim());
+      if (lines.length) out.push(lines.join("\n"));
+      continue;
+    }
+
+    if (tag === "table") {
+      const rows = [...child.querySelectorAll("tr")].map(tr =>
+        [...tr.children].map(c => inlineMarkdown(c).trim().replace(/\|/g, "/"))
+      );
+      if (rows.length) {
+        const [header, ...body] = rows;
+        out.push([
+          "| " + header.join(" | ") + " |",
+          "| " + header.map(() => "---").join(" | ") + " |",
+          ...body.map(r => "| " + r.join(" | ") + " |"),
+        ].join("\n"));
+      }
+      continue;
+    }
+
+    if (tag === "figure") { blockMarkdown(child, out); continue; }
+    if (tag === "figcaption") { const text = inlineMarkdown(child).trim(); if (text) out.push(text); continue; }
+    if (tag === "p" || tag === "li") { const text = inlineMarkdown(child).trim(); if (text) out.push(text); continue; }
+
+    // A generic container: recurse if it holds any block-level child, else
+    // treat its own inline content as a paragraph so bare text is not lost.
+    const hasBlockChild = [...child.children].some(c => HTML_BLOCK_TAGS.has(c.tagName.toLowerCase()));
+    if (hasBlockChild) { blockMarkdown(child, out); continue; }
+    const text = inlineMarkdown(child).trim();
+    if (text) out.push(text);
+  }
+}
+
+function htmlDocToMarkdown(doc) {
+  const out = [];
+  blockMarkdown(doc.body || doc.documentElement || doc, out);
+  return out.join("\n\n").trim();
+}
+
+function resolveEpubPath(baseDir, rel) {
+  const url = new URL(rel, "file:///" + baseDir.replace(/^\/+/, "") + "/");
+  return decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+}
+function epubDirOf(path) { const i = path.lastIndexOf("/"); return i < 0 ? "" : path.slice(0, i); }
+function stripFragment(href) { return href.split("#")[0]; }
+
+// container.xml and the OPF/NCX are true XML; a bare application/xml parse
+// is the right (and strict) tool for them.
+function parseStrictXml(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  const err = doc.querySelector && doc.querySelector("parsererror");
+  if (err) throw new Error("Could not parse XML: " + err.textContent.slice(0, 200));
+  return doc;
+}
+// Content documents (and nav.xhtml) are nominally XHTML, but plenty of real
+// EPUBs carry raw HTML named entities (&nbsp;, &hellip;, ...) that are not
+// legal bare XML and make strict parsing throw. text/html is far more
+// forgiving and handles those entities natively.
+function parseLenientXhtml(text) {
+  return new DOMParser().parseFromString(text, "text/html");
+}
+
+function textOfTag(doc, tag) { const el = doc.getElementsByTagName(tag)[0]; return el ? el.textContent.trim() : ""; }
+
+function findEpubRootfile(files) {
+  const containerBytes = files["META-INF/container.xml"];
+  if (!containerBytes) throw new Error("Not a valid EPUB: missing META-INF/container.xml.");
+  const doc = parseStrictXml(new TextDecoder().decode(containerBytes));
+  const path = doc.getElementsByTagName("rootfile")[0]?.getAttribute("full-path");
+  if (!path) throw new Error("Not a valid EPUB: container.xml names no rootfile.");
+  return path;
+}
+
+function parseEpubManifestAndSpine(opfDoc) {
+  const manifest = new Map();
+  for (const item of opfDoc.getElementsByTagName("item")) {
+    manifest.set(item.getAttribute("id"), {
+      href: item.getAttribute("href"),
+      mediaType: item.getAttribute("media-type") || "",
+    });
+  }
+  const spine = [...opfDoc.getElementsByTagName("itemref")]
+    .filter(el => el.getAttribute("linear") !== "no")
+    .map(el => el.getAttribute("idref"))
+    .filter(id => manifest.has(id));
+  const tocId = opfDoc.getElementsByTagName("spine")[0]?.getAttribute("toc") || "";
+  const navItem = [...opfDoc.getElementsByTagName("item")]
+    .find(el => (el.getAttribute("properties") || "").split(/\s+/).includes("nav"));
+  return { manifest, spine, tocId, navHref: navItem?.getAttribute("href") };
+}
+
+// Reads a nav.xhtml (EPUB3) or toc.ncx (EPUB2) into { resolvedPath: title }.
+function readEpubToc(files, opfDir, { navHref, tocId, manifest }) {
+  const titles = new Map();
+  const record = (path, title) => { if (path && title && !titles.has(path)) titles.set(path, title); };
+
+  if (navHref) {
+    const navPath = resolveEpubPath(opfDir, navHref);
+    const bytes = files[navPath];
+    if (bytes) {
+      const doc = parseLenientXhtml(new TextDecoder().decode(bytes));
+      const navDir = epubDirOf(navPath);
+      const navs = [...doc.getElementsByTagName("nav")];
+      const toc = navs.find(n => (n.getAttribute("epub:type") || "").includes("toc")) || navs[0];
+      if (toc) {
+        for (const a of toc.getElementsByTagName("a")) {
+          const href = a.getAttribute("href");
+          if (href) record(resolveEpubPath(navDir, stripFragment(href)), a.textContent.trim());
+        }
+      }
+    }
+  }
+
+  const ncxItem = tocId && manifest.get(tocId);
+  if (ncxItem && !titles.size) {
+    const ncxPath = resolveEpubPath(opfDir, ncxItem.href);
+    const bytes = files[ncxPath];
+    if (bytes) {
+      const doc = parseStrictXml(new TextDecoder().decode(bytes));
+      const ncxDir = epubDirOf(ncxPath);
+      for (const np of doc.getElementsByTagName("navPoint")) {
+        const label = np.getElementsByTagName("text")[0]?.textContent.trim();
+        const src = np.getElementsByTagName("content")[0]?.getAttribute("src");
+        if (src) record(resolveEpubPath(ncxDir, stripFragment(src)), label);
+      }
+    }
+  }
+  return titles;
+}
+
+// files: { path: Uint8Array } for every entry in the archive.
+function epubFilesToMarkdown(files) {
+  const opfPath = findEpubRootfile(files);
+  const opfBytes = files[opfPath];
+  if (!opfBytes) throw new Error(`Not a valid EPUB: the package file ${opfPath} is missing.`);
+  const opfDoc = parseStrictXml(new TextDecoder().decode(opfBytes));
+  const opfDir = epubDirOf(opfPath);
+
+  const bookTitle = textOfTag(opfDoc, "dc:title") || textOfTag(opfDoc, "title");
+  const { manifest, spine, tocId, navHref } = parseEpubManifestAndSpine(opfDoc);
+  if (!spine.length) throw new Error("This EPUB's spine lists no readable chapters.");
+
+  const toc = readEpubToc(files, opfDir, { navHref, tocId, manifest });
+
+  const chapters = [];
+  for (const idref of spine) {
+    const item = manifest.get(idref);
+    if (!item || !/x?html/i.test(item.mediaType)) continue;
+    const path = resolveEpubPath(opfDir, item.href);
+    const bytes = files[path];
+    if (!bytes) continue;
+    const doc = parseLenientXhtml(new TextDecoder().decode(bytes));
+    const title = toc.get(path);
+    const md = htmlDocToMarkdown(doc);
+    if (!md.trim()) continue;
+    // Only add a heading of our own if the chapter didn't already start with
+    // one — most EPUB chapters do, and doubling it would read the title twice.
+    chapters.push(/^#{1,6}\s/.test(md) || !title ? md : `# ${title}\n\n${md}`);
+  }
+  if (!chapters.length) throw new Error("No readable chapters were found in this EPUB.");
+
+  return { markdown: chapters.join("\n\n"), title: bookTitle };
+}
+
+let fflatePromise = null;
+async function epubToMarkdown(bytes) {
+  fflatePromise ||= import(FFLATE_URL);
+  let fflate;
+  try {
+    fflate = await fflatePromise;
+  } catch (e) {
+    fflatePromise = null;
+    throw new Error("Could not load the EPUB unzipper from the CDN. Reading an EPUB needs network access to cdn.jsdelivr.net the first time. " + e.message);
+  }
+  const unzipSync = fflate.unzipSync || fflate.default?.unzipSync;
+  if (!unzipSync) throw new Error("fflate loaded but exposed no unzipSync.");
+  const files = unzipSync(bytes);
+  return epubFilesToMarkdown(files);
+}
+
+/* ------------------------------------------------------------------ *
  * Audio encoding
  * ------------------------------------------------------------------ */
 
@@ -1017,6 +1316,234 @@ function concatFloat32(chunks) {
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
   return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * M4B (MP4/ISO-BMFF) muxer.
+ *
+ * One audio track — uncompressed 16-bit PCM ('sowt'), since no AAC encoder
+ * ships here — plus a tx3g text track carrying chapter titles, tied to the
+ * audio track with a tref/chap box the way ffmpeg's own mov muxer wires up
+ * chapters. That trades file size (no compression) for chapter markers and
+ * a single file, rather than a folder of MP3s. Pure function: PCM bytes and
+ * a chapter list in, an MP4 byte array out; no DOM, no network.
+ * ------------------------------------------------------------------ */
+
+function beU32(n) { return new Uint8Array([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]); }
+function beU16(n) { return new Uint8Array([(n >>> 8) & 255, n & 255]); }
+function asciiBytes(s) { const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 0xff; return b; }
+
+function concatBytes(arrays) {
+  let n = 0;
+  for (const a of arrays) n += a.length;
+  const out = new Uint8Array(n);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+// Packs a 3-letter ISO-639-2 code into the 15-bit form the 'mdhd' language
+// field expects (each letter as 1-26 in the low 5 bits, offset from 0x60).
+function packLang(code) {
+  const c = code.toLowerCase();
+  return ((c.charCodeAt(0) - 0x60) << 10) | ((c.charCodeAt(1) - 0x60) << 5) | (c.charCodeAt(2) - 0x60);
+}
+const LANG_UND = packLang("und");
+const IDENTITY_MATRIX = [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
+
+// A tiny byte-writer that tracks absolute position as it goes, so a box's
+// size prefix — and stco's chunk_offset, whose value depends on everything
+// written before it — can be patched in place by mutating the placeholder
+// Uint8Array's own backing buffer, with no relative-offset bookkeeping.
+function makeMp4Writer() {
+  const chunks = [];
+  let len = 0;
+  const w = {
+    get pos() { return len; },
+    push(arr) { chunks.push(arr); len += arr.length; return arr; },
+    u32(n) { return w.push(beU32(n)); },
+    u16(n) { return w.push(beU16(n)); },
+    u8(n) { return w.push(new Uint8Array([n & 255])); },
+    ascii(s) { return w.push(asciiBytes(s)); },
+    bytes(arr) { return w.push(arr); },
+    zeros(n) { return w.push(new Uint8Array(n)); },
+    matrix() { for (const v of IDENTITY_MATRIX) w.u32(v); },
+    box(type, build) {
+      const start = w.pos;
+      const sizeField = w.u32(0); // placeholder, patched once the size is known
+      w.ascii(type);
+      build(w);
+      patchU32(sizeField, w.pos - start);
+    },
+    finish() { return concatBytes(chunks); },
+  };
+  return w;
+}
+
+function patchU32(placeholder, value) {
+  new DataView(placeholder.buffer, placeholder.byteOffset, 4).setUint32(0, value >>> 0, false);
+}
+
+const MP4_MOVIE_TIMESCALE = 1000;
+
+// pcmBytes: 16-bit little-endian mono PCM (same bytes encodeWav would write
+// after its header). chapters: [{title, startSample}], ascending, first at 0.
+function buildM4bBytes({ pcmBytes, sampleCount, sampleRate, chapters, title }) {
+  if (!chapters || !chapters.length) chapters = [{ title: title || "Audiobook", startSample: 0 }];
+  const movieDuration = Math.round((sampleCount / sampleRate) * MP4_MOVIE_TIMESCALE);
+
+  const enc = new TextEncoder();
+  const chapterSamples = chapters.map(c => {
+    const text = enc.encode(c.title || "");
+    return concatBytes([beU16(text.length), text]);
+  });
+  const chapterBytesTotal = concatBytes(chapterSamples);
+  const chapterDurations = chapters.map((c, i) =>
+    (i + 1 < chapters.length ? chapters[i + 1].startSample : sampleCount) - c.startSample
+  );
+
+  const ftypW = makeMp4Writer();
+  ftypW.box("ftyp", b => {
+    b.ascii("M4B "); b.u32(0);
+    for (const brand of ["M4B ", "mp42", "isom"]) b.ascii(brand);
+  });
+  const ftypBytes = ftypW.finish();
+
+  let audioOffsetField = null, chapterOffsetField = null;
+  const moovW = makeMp4Writer();
+
+  moovW.box("moov", m => {
+    m.box("mvhd", b => {
+      b.u32(0);
+      b.zeros(8);
+      b.u32(MP4_MOVIE_TIMESCALE);
+      b.u32(movieDuration);
+      b.u32(0x00010000); b.u16(0x0100); b.u16(0);
+      b.zeros(8);
+      b.matrix();
+      b.zeros(24);
+      b.u32(3); // next_track_ID
+    });
+
+    // ---- audio track (track_ID 1) ----
+    m.box("trak", t => {
+      t.box("tkhd", b => {
+        b.u32(0x00000007);
+        b.zeros(8);
+        b.u32(1);
+        b.u32(0);
+        b.u32(movieDuration);
+        b.zeros(8);
+        b.u16(0); b.u16(0);
+        b.u16(0x0100); b.u16(0);
+        b.matrix();
+        b.u32(0); b.u32(0);
+      });
+      t.box("mdia", md => {
+        md.box("mdhd", b => { b.u32(0); b.zeros(8); b.u32(sampleRate); b.u32(sampleCount); b.u16(LANG_UND); b.u16(0); });
+        md.box("hdlr", b => { b.u32(0); b.u32(0); b.ascii("soun"); b.zeros(12); b.ascii("SoundHandler\0"); });
+        md.box("minf", mi => {
+          mi.box("smhd", b => { b.u32(0); b.u16(0); b.u16(0); });
+          mi.box("dinf", d => { d.box("dref", b => { b.u32(0); b.u32(1); b.box("url ", u => u.u32(1)); }); });
+          mi.box("stbl", st => {
+            st.box("stsd", b => {
+              b.u32(0); b.u32(1);
+              b.box("sowt", s => {
+                s.zeros(6); s.u16(1);
+                s.zeros(8);
+                s.u16(1); s.u16(16); s.u16(0); s.u16(0);
+                s.u32(sampleRate << 16);
+              });
+            });
+            st.box("stts", b => { b.u32(0); b.u32(1); b.u32(sampleCount); b.u32(1); });
+            st.box("stsc", b => { b.u32(0); b.u32(1); b.u32(1); b.u32(sampleCount); b.u32(1); });
+            st.box("stsz", b => { b.u32(0); b.u32(2); b.u32(sampleCount); }); // constant 2 bytes/sample
+            st.box("stco", b => { b.u32(0); b.u32(1); audioOffsetField = b.u32(0); });
+          });
+        });
+      });
+      t.box("tref", r => { r.box("chap", c => c.u32(2)); });
+    });
+
+    // ---- chapter track (track_ID 2), tx3g text samples ----
+    m.box("trak", t => {
+      t.box("tkhd", b => {
+        b.u32(0x00000007);
+        b.zeros(8);
+        b.u32(2);
+        b.u32(0);
+        b.u32(movieDuration);
+        b.zeros(8);
+        b.u16(0); b.u16(0);
+        b.u16(0); b.u16(0);
+        b.matrix();
+        b.u32(0); b.u32(0);
+      });
+      t.box("mdia", md => {
+        md.box("mdhd", b => { b.u32(0); b.zeros(8); b.u32(sampleRate); b.u32(sampleCount); b.u16(LANG_UND); b.u16(0); });
+        md.box("hdlr", b => { b.u32(0); b.u32(0); b.ascii("text"); b.zeros(12); b.ascii("ChapterHandler\0"); });
+        md.box("minf", mi => {
+          mi.box("gmhd", g => { g.box("gmin", b => { b.u32(0); b.u16(0); b.u16(0); b.u16(0); b.u16(0); b.u16(0); b.u16(0); }); });
+          mi.box("dinf", d => { d.box("dref", b => { b.u32(0); b.u32(1); b.box("url ", u => u.u32(1)); }); });
+          mi.box("stbl", st => {
+            st.box("stsd", b => {
+              b.u32(0); b.u32(1);
+              b.box("tx3g", s => {
+                s.zeros(6); s.u16(1);
+                s.u32(0);
+                s.u8(0); s.u8(0);
+                s.u32(0x000000ff);
+                s.zeros(8);
+                s.u16(0); s.u16(0); s.u16(1); s.u8(0); s.u8(0); s.u32(0xffffffff);
+                s.box("ftab", f => { f.u16(1); f.u16(1); const name = "Serif"; f.u8(name.length); f.ascii(name); });
+              });
+            });
+            st.box("stts", b => {
+              b.u32(0); b.u32(chapters.length);
+              for (const d of chapterDurations) { b.u32(1); b.u32(Math.max(1, d)); }
+            });
+            st.box("stsc", b => { b.u32(0); b.u32(1); b.u32(1); b.u32(chapters.length); b.u32(1); });
+            st.box("stsz", b => {
+              b.u32(0); b.u32(0); b.u32(chapterSamples.length);
+              for (const s of chapterSamples) b.u32(s.length);
+            });
+            st.box("stco", b => { b.u32(0); b.u32(1); chapterOffsetField = b.u32(0); });
+          });
+        });
+      });
+    });
+
+    if (title) {
+      m.box("udta", u => {
+        u.box("meta", me => {
+          me.u32(0);
+          me.box("hdlr", b => { b.u32(0); b.u32(0); b.ascii("mdir"); b.zeros(12); b.u8(0); });
+          me.box("ilst", il => { il.box("©nam", nm => { nm.box("data", d => { d.u32(1); d.u32(0); d.ascii(title); }); }); });
+        });
+      });
+    }
+  });
+
+  const audioMdatOffset = ftypBytes.length + moovW.pos + 8;
+  const chapterMdatOffset = audioMdatOffset + pcmBytes.length + 8;
+  patchU32(audioOffsetField, audioMdatOffset);
+  patchU32(chapterOffsetField, chapterMdatOffset);
+  const moovBytes = moovW.finish();
+
+  const audioMdatW = makeMp4Writer();
+  audioMdatW.box("mdat", b => b.bytes(pcmBytes));
+  const chapterMdatW = makeMp4Writer();
+  chapterMdatW.box("mdat", b => b.bytes(chapterBytesTotal));
+
+  return concatBytes([ftypBytes, moovBytes, audioMdatW.finish(), chapterMdatW.finish()]);
+}
+
+// chapters: [{title, startSample}]. Always mono PCM at SAMPLE_RATE, matching encodeWav.
+function encodeM4b(float32, chapters, title, sampleRate = SAMPLE_RATE) {
+  const pcm = toPcm16(float32);
+  const pcmBytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  const bytes = buildM4bBytes({ pcmBytes, sampleCount: pcm.length, sampleRate, chapters, title });
+  return new Blob([bytes], { type: "audio/mp4" });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1131,10 +1658,11 @@ async function blobToZipEntry(name, blob) {
 
 const $ = id => document.getElementById(id);
 const els = {
-  drop: $("drop"), file: $("file"), md: $("md"), stats: $("stats"),
+  drop: $("drop"), file: $("file"), md: $("md"), stats: $("stats"), queue: $("queue"),
   voice: $("voice"), speed: $("speed"), format: $("format"), split: $("split"),
   device: $("device"), dtype: $("dtype"), code: $("code"), tables: $("tables"),
   numberLists: $("numberLists"), preview: $("preview"),
+  previewVoice: $("previewVoice"), previewAudio: $("previewAudio"),
   go: $("go"), cancel: $("cancel"), bar: $("bar"), barWrap: $("barWrap"), log: $("log"),
   results: $("results"), tracks: $("tracks"), dlAll: $("dlAll"), dlZip: $("dlZip"),
   fileHint: $("fileHint"), fatal: $("fatal"),
@@ -1176,6 +1704,41 @@ fillVoices(VOICES);
 
 if (location.protocol === "file:") els.fileHint.classList.remove("hidden");
 
+/* ---- remembered settings ---- *
+ * Only Section 2's controls: what to speak (the document) and what happened
+ * in a past run (results) are never persisted, only how to speak it. */
+
+const SETTINGS_KEY = "zab-settings";
+const SETTINGS_FIELDS = ["voice", "speed", "format", "split", "device", "dtype", "code", "tables"];
+
+// A saved voice id may not be one of the curated defaults shown before the
+// model loads, so setting it immediately can silently fail (an absent
+// <option> just leaves the <select> unselected). Re-applied once the real
+// voice list arrives — see modelReady below — where it always exists.
+let pendingVoice = null;
+
+function loadSettings() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null"); } catch { saved = null; }
+  if (!saved) return;
+  for (const f of SETTINGS_FIELDS) if (saved[f] != null) els[f].value = saved[f];
+  if (typeof saved.numberLists === "boolean") els.numberLists.checked = saved.numberLists;
+  pendingVoice = saved.voice || null;
+}
+function saveSettings() {
+  const out = { numberLists: els.numberLists.checked };
+  for (const f of SETTINGS_FIELDS) out[f] = els[f].value;
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(out)); } catch { /* private mode, quota, etc. */ }
+}
+try { loadSettings(); } catch { /* corrupt storage shouldn't block the page loading */ }
+for (const f of [...SETTINGS_FIELDS, "numberLists"]) {
+  // "input" too, not just "change": speed is free-typed and native `change`
+  // only fires on blur, so typing a value and closing the tab without
+  // clicking away would otherwise lose it.
+  els[f].addEventListener("input", saveSettings);
+  els[f].addEventListener("change", saveSettings);
+}
+
 function log(msg) { els.log.textContent = msg; }
 function progress(frac) {
   els.barWrap.classList.toggle("hidden", frac == null);
@@ -1194,11 +1757,32 @@ function currentOpts() {
   };
 }
 
+// Rough on-disk size for the chosen format, matching what the encoders above
+// actually produce: 16-bit mono PCM for WAV and M4B, 128kbps CBR for MP3.
+function estimateBytes(seconds, fmt) {
+  if (fmt === "mp3") return seconds * (128_000 / 8);
+  return seconds * SAMPLE_RATE * 2; // wav / m4b: uncompressed 16-bit mono
+}
+function fmtBytes(n) {
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1048576).toFixed(n < 20 * 1048576 ? 1 : 0)} MB`;
+}
+
 let docTitle = "audiobook";
 
 function refresh() {
+  const src = activeQueueIndex != null ? queue[activeQueueIndex] : null;
+  if (src) src.markdown = els.md.value;
+
   const { body, title } = stripFrontMatter(els.md.value);
-  if (title) docTitle = slugify(title, "audiobook");
+  if (title) {
+    // In queue mode this is one book among several: its own title, not the
+    // page-wide docTitle (which only names the single-document path below).
+    const slug = slugify(title, src ? src.title : "audiobook");
+    if (src) { if (slug !== src.title) { src.title = slug; renderQueue(); } }
+    else docTitle = slug;
+  }
+
   const tokens = tokenizeMarkdown(body);
   const opts = currentOpts();
   const text = tokensToSpeech(tokens, opts);
@@ -1209,33 +1793,147 @@ function refresh() {
   const words = wordCount(text);
   const mins = words / 150 / (+els.speed.value || 1);
   const parts = sectionsWithText(tokens, +els.split.value, opts).length;
+  const bytes = estimateBytes(mins * 60, els.format.value);
   els.stats.textContent =
     `${words.toLocaleString()} words · ${text.length.toLocaleString()} characters · ` +
-    `${parts} ${parts === 1 ? "part" : "parts"} · roughly ${mins < 1 ? "<1" : Math.round(mins)} min of audio`;
+    `${parts} ${parts === 1 ? "part" : "parts"} · roughly ${mins < 1 ? "<1" : Math.round(mins)} min of audio ` +
+    `· about ${fmtBytes(bytes)}`;
 }
 
-async function loadFile(f) {
-  docTitle = slugify(f.name.replace(/\.[^.]+$/, ""), "audiobook");
-  els.fatal.classList.add("hidden");
+/* ---- file loading: Markdown, PDF, EPUB, and a multi-file queue ---- */
 
-  const isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
-  if (!isPdf) {
+const queue = []; // { id, name, title, markdown, status: 'converting'|'ready'|'error' }
+let activeQueueIndex = null;
+let queueSeq = 0;
+
+function kindOf(f) {
+  if (f.type === "application/pdf" || /\.pdf$/i.test(f.name)) return "pdf";
+  if (f.type === "application/epub+zip" || /\.epub$/i.test(f.name)) return "epub";
+  return "md";
+}
+
+function renderQueue() {
+  els.queue.classList.toggle("hidden", queue.length < 2);
+  els.queue.innerHTML = "";
+  queue.forEach((item, i) => {
+    const row = document.createElement("div");
+    row.className = "queue-item" + (i === activeQueueIndex ? " active" : "");
+    const name = document.createElement("span");
+    name.className = "qname";
+    name.textContent = item.title || item.name;
+    const status = document.createElement("span");
+    status.className = "qstatus";
+    status.textContent = item.status === "converting" ? "Converting…" : item.status === "error" ? "Error" : "Ready";
+    const rm = document.createElement("button");
+    rm.className = "qrm";
+    rm.type = "button";
+    rm.title = "Remove from the queue";
+    rm.textContent = "×";
+    rm.addEventListener("click", e => { e.stopPropagation(); removeFromQueue(i); });
+    row.append(name, status, rm);
+    row.addEventListener("click", () => selectQueueItem(i));
+    els.queue.appendChild(row);
+  });
+  els.go.textContent = queue.length >= 2 ? `Generate ${queue.length} audiobooks` : "Generate audiobook";
+}
+
+function selectQueueItem(i) {
+  activeQueueIndex = i;
+  els.md.value = queue[i].markdown;
+  docTitle = queue[i].title;
+  renderQueue();
+  refresh();
+}
+
+function removeFromQueue(i) {
+  queue.splice(i, 1);
+  if (!queue.length) { activeQueueIndex = null; els.md.value = ""; docTitle = "audiobook"; }
+  else if (activeQueueIndex != null) {
+    if (i === activeQueueIndex) selectQueueItem(Math.min(i, queue.length - 1));
+    else if (i < activeQueueIndex) activeQueueIndex--;
+  }
+  renderQueue();
+  refresh();
+}
+
+async function convertQueueItem(item, bytesPromise) {
+  item.status = "converting";
+  renderQueue();
+  try {
+    if (item.kind === "pdf") {
+      item.markdown = await pdfToMarkdown(await bytesPromise, () => {});
+    } else if (item.kind === "epub") {
+      const { markdown, title } = await epubToMarkdown(await bytesPromise);
+      item.markdown = markdown;
+      if (title) item.title = slugify(title, item.title);
+    }
+    item.status = "ready";
+  } catch (e) {
+    console.error(e);
+    item.status = "error";
+    item.markdown = "";
+    item.error = e.message || String(e);
+  }
+  renderQueue();
+  if (activeQueueIndex === queue.indexOf(item)) { els.md.value = item.markdown; refresh(); }
+}
+
+async function addFiles(files) {
+  els.fatal.classList.add("hidden");
+  const list = [...files];
+  if (!list.length) return;
+
+  // A single file with an empty queue behaves exactly as before: load it
+  // straight into the textarea, no queue UI at all.
+  if (list.length === 1 && !queue.length) return loadSingleFile(list[0]);
+
+  for (const f of list) {
+    const kind = kindOf(f);
+    const item = {
+      id: ++queueSeq, name: f.name, kind,
+      title: slugify(f.name.replace(/\.[^.]+$/, ""), "audiobook-" + queueSeq),
+      markdown: "", status: "converting",
+    };
+    queue.push(item);
+    if (kind === "md") {
+      item.markdown = await f.text();
+      item.status = "ready";
+    } else {
+      convertQueueItem(item, f.arrayBuffer().then(b => new Uint8Array(b)));
+    }
+  }
+  renderQueue();
+  if (activeQueueIndex == null) selectQueueItem(0);
+}
+
+async function loadSingleFile(f) {
+  docTitle = slugify(f.name.replace(/\.[^.]+$/, ""), "audiobook");
+  const kind = kindOf(f);
+
+  if (kind === "md") {
     els.md.value = await f.text();
     refresh();
     return;
   }
 
   els.go.disabled = true;
-  log("Reading the PDF\u2026");
+  log(kind === "pdf" ? "Reading the PDF…" : "Reading the EPUB…");
   try {
     const bytes = new Uint8Array(await f.arrayBuffer());
-    els.md.value = await pdfToMarkdown(bytes, (n, total) => {
-      progress(n / total);
-      log(`Reading the PDF \u2014 page ${n} of ${total}`);
-    });
+    if (kind === "pdf") {
+      els.md.value = await pdfToMarkdown(bytes, (n, total) => {
+        progress(n / total);
+        log(`Reading the PDF — page ${n} of ${total}`);
+      });
+      log("PDF converted. Check the text below before generating: headings, " +
+          "running heads and footnotes are guessed, so fix anything wrong here.");
+    } else {
+      const { markdown, title } = await epubToMarkdown(bytes);
+      els.md.value = markdown;
+      if (title) docTitle = slugify(title, docTitle);
+      log("EPUB converted. Check the text below before generating.");
+    }
     progress(null);
-    log("PDF converted. Check the text below before generating: headings, " +
-        "running heads and footnotes are guessed, so fix anything wrong here.");
     refresh();
   } catch (e) {
     console.error(e);
@@ -1250,27 +1948,212 @@ async function loadFile(f) {
 }
 
 els.drop.addEventListener("click", () => els.file.click());
-els.file.addEventListener("change", e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+els.file.addEventListener("change", e => { if (e.target.files.length) addFiles(e.target.files); e.target.value = ""; });
 for (const ev of ["dragenter", "dragover"]) {
   els.drop.addEventListener(ev, e => { e.preventDefault(); els.drop.classList.add("over"); });
 }
 for (const ev of ["dragleave", "drop"]) {
   els.drop.addEventListener(ev, e => { e.preventDefault(); els.drop.classList.remove("over"); });
 }
-els.drop.addEventListener("drop", e => { if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
-for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.speed]) {
+els.drop.addEventListener("drop", e => { if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+for (const el of [els.md, els.split, els.code, els.tables, els.numberLists, els.speed, els.format]) {
   el.addEventListener("input", refresh);
   el.addEventListener("change", refresh);
 }
 
-/* ---- synthesis ---- */
+/* ------------------------------------------------------------------ *
+ * Synthesis — runs in a Web Worker so the tab stays responsive during a
+ * long WASM/WebGPU run, and so a batch's second and third book reuse the
+ * same already-loaded model instead of reloading it per document.
+ *
+ * The worker is built from a Blob URL rather than a second file, to keep
+ * this a single-file app. Its pure helpers (encoders, the M4B muxer) are
+ * embedded via Function#toString() from the copies defined above, rather
+ * than retyped, so there is exactly one source of truth for each.
+ * ------------------------------------------------------------------ */
 
-let tts = null;
-let ttsKey = "";            // "<device>|<dtype>" the cached model was built with
-let TextSplitterStream = null;
-let cancelled = false;
-const objectUrls = [];
-const trackFiles = []; // { name, blob } for every track currently listed, for the zip button
+const WORKER_SRC = `
+"use strict";
+const SAMPLE_RATE = ${SAMPLE_RATE};
+const MODEL_ID = ${JSON.stringify(MODEL_ID)};
+const KOKORO_URL = ${JSON.stringify(KOKORO_URL)};
+const LAMEJS_URL = ${JSON.stringify(LAMEJS_URL)};
+let lamePromise = null;
+
+const toPcm16 = ${toPcm16.toString()};
+const encodeWav = ${encodeWav.toString()};
+const encodeMp3 = ${encodeMp3.toString()};
+const concatFloat32 = ${concatFloat32.toString()};
+
+const beU32 = ${beU32.toString()};
+const beU16 = ${beU16.toString()};
+const asciiBytes = ${asciiBytes.toString()};
+const concatBytes = ${concatBytes.toString()};
+const packLang = ${packLang.toString()};
+const LANG_UND = packLang("und");
+const IDENTITY_MATRIX = ${JSON.stringify(IDENTITY_MATRIX)};
+const makeMp4Writer = ${makeMp4Writer.toString()};
+const patchU32 = ${patchU32.toString()};
+const MP4_MOVIE_TIMESCALE = ${MP4_MOVIE_TIMESCALE};
+const buildM4bBytes = ${buildM4bBytes.toString()};
+const encodeM4b = ${encodeM4b.toString()};
+
+let tts = null, ttsKey = "", TextSplitterStream = null, cancelled = false;
+
+async function ensureModel(device, dtype) {
+  const key = device + "|" + dtype;
+  if (tts && ttsKey === key) return tts;
+  if (tts) {
+    try { tts.model?.dispose?.(); } catch {}
+    tts = null; ttsKey = "";
+  }
+  let mod;
+  try {
+    mod = await import(KOKORO_URL);
+  } catch (e) {
+    throw new Error(
+      "Could not load kokoro-js from the CDN. The first run needs network access to " +
+      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
+    );
+  }
+  TextSplitterStream = mod.TextSplitterStream;
+  const seen = new Map();
+  tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
+    dtype, device,
+    progress_callback: p => {
+      if (!p || !p.file) return;
+      if (p.status === "progress" && p.total) {
+        seen.set(p.file, { loaded: p.loaded, total: p.total });
+        let loaded = 0, total = 0;
+        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
+        postMessage({ evt: "modelProgress", loaded, total });
+      }
+    },
+  });
+  ttsKey = key;
+  let voices = [];
+  try {
+    const list = tts.list_voices?.();
+    voices = Array.isArray(list) ? list : Object.keys(list || {});
+  } catch {}
+  postMessage({ evt: "modelReady", voices });
+  return tts;
+}
+
+async function synthSection(text, voice, speed, onChunk) {
+  const splitter = new TextSplitterStream();
+  const stream = tts.stream(splitter, { voice, speed });
+  const chunks = [];
+  const consume = (async () => {
+    for await (const item of stream) {
+      if (cancelled) break;
+      const data = item.audio?.audio ?? item.audio;
+      if (data?.length) { chunks.push(data); onChunk(data.length); }
+    }
+  })();
+  splitter.push(text);
+  splitter.close();
+  await consume;
+  return concatFloat32(chunks);
+}
+
+async function encodeFormat(fmt, float32, chapters, title) {
+  if (fmt === "mp3") return encodeMp3(float32);
+  if (fmt === "m4b") return encodeM4b(float32, chapters, title);
+  return encodeWav(float32);
+}
+
+self.onmessage = async (e) => {
+  const msg = e.data;
+  if (msg.cmd === "cancel") { cancelled = true; return; }
+
+  if (msg.cmd === "preview") {
+    try {
+      cancelled = false;
+      await ensureModel(msg.device, msg.dtype);
+      const audio = await synthSection(msg.text, msg.voice, msg.speed, () => {});
+      const buf = await (await encodeWav(audio)).arrayBuffer();
+      postMessage({ evt: "previewDone", buf }, [buf]);
+    } catch (err) {
+      postMessage({ evt: "error", message: err.message || String(err) });
+    }
+    return;
+  }
+
+  if (msg.cmd === "generate") {
+    const { jobId, sections, voice, speed, format, device, dtype, docTitle } = msg;
+    cancelled = false;
+    try {
+      await ensureModel(device, dtype);
+      const t0 = Date.now();
+      let doneChars = 0, totalSamples = 0;
+      const totalChars = sections.reduce((n, s) => n + s.text.length, 0) || 1;
+      const all = [];
+      const chapters = [];
+
+      for (let i = 0; i < sections.length; i++) {
+        if (cancelled) break;
+        const s = sections[i];
+        const label = s.title || (sections.length > 1 ? "Part " + (i + 1) : "Audiobook");
+        chapters.push({ title: label, startSample: totalSamples });
+
+        const audio = await synthSection(s.text, voice, speed, added => {
+          totalSamples += added;
+          const secs = totalSamples / SAMPLE_RATE;
+          const elapsed = (Date.now() - t0) / 1000;
+          postMessage({
+            evt: "sectionProgress", jobId, index: i, count: sections.length, label,
+            frac: (doneChars + s.text.length * 0.5) / totalChars,
+            secs, elapsed, rtf: elapsed / Math.max(secs, 0.001),
+          });
+        });
+
+        doneChars += s.text.length;
+        postMessage({ evt: "sectionProgress", jobId, index: i, count: sections.length, label, frac: doneChars / totalChars });
+        if (cancelled) break;
+        if (!audio.length) continue;
+        all.push(audio);
+
+        if (sections.length > 1 && format !== "m4b") {
+          const n = String(i + 1).padStart(2, "0");
+          const blob = await encodeFormat(format, audio);
+          const buf = await blob.arrayBuffer();
+          postMessage({ evt: "sectionDone", jobId, index: i, label, n, buf, mime: blob.type, seconds: audio.length / SAMPLE_RATE }, [buf]);
+        }
+      }
+
+      if (cancelled) { postMessage({ jobId, evt: "cancelled" }); return; }
+      if (!all.length) { postMessage({ jobId, evt: "error", message: "No audio was produced." }); return; }
+
+      postMessage({ jobId, evt: "encoding" });
+      const full = concatFloat32(all);
+      const blob = await encodeFormat(format, full, chapters, docTitle);
+      const buf = await blob.arrayBuffer();
+      const elapsed = (Date.now() - t0) / 1000;
+      const secs = full.length / SAMPLE_RATE;
+      postMessage({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
+      postMessage({ jobId, evt: "done", elapsed, secs, device });
+    } catch (err) {
+      postMessage({ jobId, evt: "error", message: err.message || String(err) });
+    }
+  }
+};
+`;
+
+let worker = null;
+function getWorker() {
+  if (worker) return worker;
+  worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })), { type: "module" });
+  worker.onmessage = e => onWorkerMessage(e.data);
+  worker.onerror = e => {
+    console.error(e);
+    fatal("The synthesis worker crashed: " + (e.message || e));
+    // Otherwise a crash mid-book leaves runGenerateJob's promise pending
+    // forever and the UI stuck in "generating".
+    if (activeJob) { const job = activeJob; activeJob = null; job.reject(new Error(e.message || "worker crashed")); }
+  };
+  return worker;
+}
 
 function pickDevice() {
   if (els.device.value !== "auto") return els.device.value;
@@ -1282,82 +2165,15 @@ function pickDtype(device) {
   return device === "webgpu" ? "fp32" : "q8";
 }
 
-async function ensureModel(device, dtype) {
-  const key = `${device}|${dtype}`;
-  if (tts && ttsKey === key) return tts;
-  if (tts) {
-    // Device or precision changed, so the cached model is the wrong one.
-    // Without this the dropdowns silently do nothing after the first run.
-    try { tts.model?.dispose?.(); } catch { /* best effort; not all builds expose it */ }
-    tts = null;
-    ttsKey = "";
-  }
-  log(`Loading Kokoro-82M (${device}, ${dtype})… the first run downloads the weights.`);
-
-  let mod;
-  try {
-    mod = await import(KOKORO_URL);
-  } catch (e) {
-    throw new Error(
-      "Could not load kokoro-js from the CDN. The first run needs network access to " +
-      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
-    );
-  }
-  TextSplitterStream = mod.TextSplitterStream;
-
-  const seen = new Map();
-  tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
-    dtype, device,
-    progress_callback: p => {
-      if (!p || !p.file) return;
-      if (p.status === "progress" && p.total) {
-        seen.set(p.file, { loaded: p.loaded, total: p.total });
-        let loaded = 0, total = 0;
-        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
-        progress(loaded / total);
-        log(`Downloading model — ${(loaded / 1048576).toFixed(1)} MB of ${(total / 1048576).toFixed(1)} MB`);
-      }
-    },
-  });
-  ttsKey = key;
-
-  try {
-    const list = tts.list_voices?.();
-    const ids = Array.isArray(list) ? list : Object.keys(list || {});
-    if (ids.length) fillVoices([["Voices", ids.map(id => [id, id])]], els.voice.value);
-  } catch { /* keep the static list */ }
-
-  progress(null);
-  return tts;
-}
-
-async function synthSection(text, voice, speed, onChunk) {
-  const splitter = new TextSplitterStream();
-  const stream = tts.stream(splitter, { voice, speed });
-  const chunks = [];
-
-  // Start consuming before pushing, so a splitter that applies backpressure
-  // cannot deadlock against a large document.
-  const consume = (async () => {
-    for await (const item of stream) {
-      if (cancelled) break;
-      const data = item.audio?.audio ?? item.audio;
-      if (data?.length) { chunks.push(data); onChunk(data.length); }
-    }
-  })();
-
-  splitter.push(capLongRuns(text));
-  splitter.close();
-  await consume;
-  return concatFloat32(chunks);
-}
-
 function fmtTime(s) {
   const m = Math.floor(s / 60), sec = Math.round(s % 60);
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
-function addTrack(name, filename, blob, seconds, first = false) {
+const objectUrls = [];
+const trackFiles = []; // { name, blob } for every track currently listed, for the zip button
+
+function addTrack(name, filename, blob, seconds, { first = false, zipName = filename } = {}) {
   const url = URL.createObjectURL(blob);
   objectUrls.push(url);
 
@@ -1368,7 +2184,7 @@ function addTrack(name, filename, blob, seconds, first = false) {
   const b = document.createElement("b");
   b.textContent = name;
   const right = document.createElement("small");
-  right.textContent = `${fmtTime(seconds)} · ${(blob.size / 1048576).toFixed(1)} MB  `;
+  right.textContent = `${fmtTime(seconds)} · ${(blob.size / 1048576).toFixed(1)} MB  `;
   const a = document.createElement("a");
   a.className = "dl";
   a.href = url;
@@ -1383,86 +2199,166 @@ function addTrack(name, filename, blob, seconds, first = false) {
   audio.src = url;
   div.append(top, audio);
 
-  if (first) { els.tracks.prepend(div); trackFiles.unshift({ name: filename, blob }); }
-  else { els.tracks.appendChild(div); trackFiles.push({ name: filename, blob }); }
+  if (first) { els.tracks.prepend(div); trackFiles.unshift({ name: zipName, blob }); }
+  else { els.tracks.appendChild(div); trackFiles.push({ name: zipName, blob }); }
   els.results.classList.remove("hidden");
 }
+
+// One in-flight worker job at a time; batches run their books sequentially
+// through this same worker, so a cached model carries over between them.
+let cancelled = false;
+let jobSeq = 0;
+let activeJob = null; // { jobId, resolve, reject, bookLabel, bookIndex, bookCount, flatPrefix, zipPrefix, docTitle, ext }
+let previewUrl = null;
+
+function onWorkerMessage(msg) {
+  if (msg.evt === "modelProgress") {
+    progress(msg.loaded / msg.total);
+    log(`Loading Kokoro-82M — ${(msg.loaded / 1048576).toFixed(1)} MB of ${(msg.total / 1048576).toFixed(1)} MB`);
+    return;
+  }
+  if (msg.evt === "modelReady") {
+    if (msg.voices?.length) fillVoices([["Voices", msg.voices.map(id => [id, id])]], pendingVoice || els.voice.value);
+    pendingVoice = null;
+    progress(null);
+    return;
+  }
+  if (msg.evt === "previewDone") {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    const blob = new Blob([msg.buf], { type: "audio/wav" });
+    previewUrl = URL.createObjectURL(blob);
+    els.previewAudio.src = previewUrl;
+    els.previewAudio.classList.remove("hidden");
+    els.previewAudio.play().catch(() => {}); // autoplay can be blocked; the controls still work
+    els.previewVoice.disabled = false;
+    els.previewVoice.textContent = "▶ Preview";
+    return;
+  }
+
+  const job = activeJob;
+  if (!job || msg.jobId !== job.jobId) return;
+
+  if (msg.evt === "sectionProgress") {
+    if (msg.frac != null) progress((job.bookIndex + msg.frac) / job.bookCount);
+    const suffix = msg.secs != null
+      ? ` — ${fmtTime(msg.secs)} of audio · ${msg.elapsed.toFixed(1)}s elapsed · RTF ${msg.rtf.toFixed(2)}x`
+      : "";
+    log(`${job.bookLabel}[${msg.index + 1}/${msg.count}] ${msg.label}${suffix}`);
+    return;
+  }
+  if (msg.evt === "encoding") { log(`${job.bookLabel}Encoding the complete book…`); return; }
+  if (msg.evt === "sectionDone") {
+    const slug = slugify(msg.label, "part-" + msg.n);
+    addTrack(`${job.bookLabel}${msg.label}`, `${job.flatPrefix}${msg.n}-${slug}.${job.ext}`,
+      new Blob([msg.buf], { type: msg.mime }), msg.seconds, { zipName: `${job.zipPrefix}${msg.n}-${slug}.${job.ext}` });
+    return;
+  }
+  if (msg.evt === "bookDone") {
+    addTrack(`${job.bookLabel}Complete book`, `${job.docTitle}.${job.ext}`,
+      new Blob([msg.buf], { type: msg.mime }), msg.seconds, { first: job.bookCount <= 1 });
+    return;
+  }
+  if (msg.evt === "done" || msg.evt === "cancelled" || msg.evt === "error") {
+    activeJob = null;
+    if (msg.evt === "error") job.reject(new Error(msg.message));
+    else job.resolve(msg);
+  }
+}
+
+// Resolves once this book's job finishes (or is cancelled); UI updates for
+// its events happen as a side effect of onWorkerMessage above.
+function runGenerateJob(sections, settings, bookMeta) {
+  return new Promise((resolve, reject) => {
+    const jobId = ++jobSeq;
+    activeJob = {
+      jobId, resolve, reject,
+      bookLabel: bookMeta.bookLabel, bookIndex: bookMeta.bookIndex, bookCount: bookMeta.bookCount,
+      flatPrefix: bookMeta.flatPrefix, zipPrefix: bookMeta.zipPrefix,
+      docTitle: settings.docTitle, ext: settings.format,
+    };
+    getWorker().postMessage({ cmd: "generate", jobId, sections, ...settings });
+  });
+}
+
+els.previewVoice.addEventListener("click", () => {
+  if (activeJob) return; // the worker is mid-book; wait rather than interleave with it
+  const sample = "This is what your audiobook will sound like.";
+  els.previewVoice.disabled = true;
+  els.previewVoice.textContent = "Loading…";
+  const device = pickDevice();
+  getWorker().postMessage({
+    cmd: "preview", text: sample, voice: els.voice.value, speed: +els.speed.value || 1,
+    device, dtype: pickDtype(device),
+  });
+});
 
 async function generate() {
   cancelled = false;
   els.fatal.classList.add("hidden");
   els.go.disabled = true;
+  els.previewVoice.disabled = true; // one job at a time on the shared worker
   els.cancel.classList.remove("hidden");
   els.results.classList.add("hidden");
   els.tracks.innerHTML = "";
   for (const u of objectUrls.splice(0)) URL.revokeObjectURL(u);
   trackFiles.length = 0;
 
-  const opts = currentOpts();
-  const { body } = stripFrontMatter(els.md.value);
-  const tokens = tokenizeMarkdown(body);
-  const sections = sectionsWithText(tokens, +els.split.value, opts);
+  const books = queue.length >= 2
+    ? queue.filter(q => q.status === "ready")
+    : [{ title: docTitle, markdown: els.md.value }];
 
-  if (!sections.length) {
-    fatal("There is no readable text in that document.");
+  if (!books.length) {
+    fatal("Nothing in the queue is ready to generate yet.");
     els.go.disabled = false;
     els.cancel.classList.add("hidden");
     return;
   }
+  if (queue.length >= 2 && books.length < queue.length) {
+    log(`Skipping ${queue.length - books.length} item(s) still converting or in error.`);
+  }
 
-  const totalChars = sections.reduce((n, s) => n + s.text.length, 0);
+  const opts = currentOpts();
   const voice = els.voice.value;
   const speed = +els.speed.value || 1;
   const fmt = els.format.value;
   const device = pickDevice();
+  const dtype = pickDtype(device);
+  const t0 = performance.now();
 
   try {
-    await ensureModel(device, pickDtype(device));
-
-    const t0 = performance.now();
-    let doneChars = 0, totalSamples = 0;
-    const all = [];
-
-    for (let i = 0; i < sections.length; i++) {
+    for (let bi = 0; bi < books.length; bi++) {
       if (cancelled) break;
-      const s = sections[i];
-      const label = s.title || (sections.length > 1 ? `Part ${i + 1}` : "Audiobook");
+      const { body, title: fmTitle } = stripFrontMatter(books[bi].markdown);
+      const bookTitle = fmTitle ? slugify(fmTitle, books[bi].title) : books[bi].title;
+      const tokens = tokenizeMarkdown(body);
+      const sections = sectionsWithText(tokens, +els.split.value, opts)
+        .map(s => ({ title: s.title, text: capLongRuns(s.text) }));
 
-      const audio = await synthSection(s.text, voice, speed, added => {
-        totalSamples += added;
-        const secs = totalSamples / SAMPLE_RATE;
-        const elapsed = (performance.now() - t0) / 1000;
-        // Mid-section the character count is only half-consumed; good enough for a bar.
-        progress((doneChars + s.text.length * 0.5) / totalChars);
-        log(`[${i + 1}/${sections.length}] ${label} — ${fmtTime(secs)} of audio · ` +
-            `${elapsed.toFixed(1)}s elapsed · RTF ${(elapsed / Math.max(secs, 0.001)).toFixed(2)}x`);
-      });
+      if (!sections.length) { log(`Skipping "${bookTitle}" — no readable text.`); continue; }
 
-      doneChars += s.text.length;
-      progress(doneChars / totalChars);
-      if (cancelled) break;
-      if (!audio.length) continue;
-
-      all.push(audio);
-      if (sections.length > 1) {
-        const n = String(i + 1).padStart(2, "0");
-        const blob = fmt === "mp3" ? await encodeMp3(audio) : encodeWav(audio);
-        addTrack(label, `${n}-${slugify(label, "part-" + n)}.${fmt}`, blob, audio.length / SAMPLE_RATE);
+      if (books.length > 1) {
+        const h = document.createElement("h3");
+        h.className = "book-divider";
+        h.textContent = `Book ${bi + 1} of ${books.length}: ${bookTitle}`;
+        els.tracks.appendChild(h);
+        els.results.classList.remove("hidden");
       }
+
+      const bookSlug = slugify(bookTitle, "book-" + (bi + 1));
+      await runGenerateJob(sections, { voice, speed, format: fmt, device, dtype, docTitle: bookTitle }, {
+        bookLabel: books.length > 1 ? `Book ${bi + 1}/${books.length} — ` : "",
+        bookIndex: bi, bookCount: books.length,
+        flatPrefix: books.length > 1 ? `${bookSlug}-` : "",
+        zipPrefix: books.length > 1 ? `${bookSlug}/` : "",
+      });
+      if (cancelled) break;
     }
 
-    if (cancelled) { log("Cancelled."); return; }
-    if (!all.length) { fatal("No audio was produced."); return; }
-
-    log("Encoding the complete book…");
-    const full = concatFloat32(all);
-    const blob = fmt === "mp3" ? await encodeMp3(full) : encodeWav(full);
-    addTrack("Complete book", `${docTitle}.${fmt}`, blob, full.length / SAMPLE_RATE, true);
+    if (cancelled) { log("Cancelled."); progress(null); return; }
 
     const elapsed = (performance.now() - t0) / 1000;
-    const secs = full.length / SAMPLE_RATE;
-    log(`Done — ${fmtTime(secs)} of audio in ${elapsed.toFixed(1)}s ` +
-        `(RTF ${(elapsed / secs).toFixed(2)}x, ${(secs / elapsed).toFixed(1)}x faster than real time) on ${device}.`);
+    log(`Done — ${books.length > 1 ? books.length + " books" : "audiobook"} generated in ` +
+        `${elapsed.toFixed(1)}s on ${device}.`);
     progress(null);
   } catch (e) {
     console.error(e);
@@ -1471,12 +2367,17 @@ async function generate() {
     progress(null);
   } finally {
     els.go.disabled = false;
+    els.previewVoice.disabled = false;
     els.cancel.classList.add("hidden");
   }
 }
 
 els.go.addEventListener("click", generate);
-els.cancel.addEventListener("click", () => { cancelled = true; log("Cancelling…"); });
+els.cancel.addEventListener("click", () => {
+  cancelled = true;
+  if (worker) worker.postMessage({ cmd: "cancel" });
+  log("Cancelling…");
+});
 els.dlAll.addEventListener("click", () => {
   for (const a of els.tracks.querySelectorAll("a.dl")) a.click();
 });
@@ -1509,7 +2410,7 @@ els.dlZip.addEventListener("click", async () => {
     const url = URL.createObjectURL(zip);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${docTitle}.zip`;
+    a.download = queue.length >= 2 ? "audiobooks.zip" : `${docTitle}.zip`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1523,6 +2424,12 @@ els.dlZip.addEventListener("click", async () => {
   }
 });
 
+if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => { /* offline install is a bonus, not a requirement */ });
+  });
+}
+
 // Exposed so the text and encoding pipeline can be exercised without the model.
 window.ZAB = {
   stripFrontMatter, tokenizeMarkdown, inlineToSpeech, tokensToSpeech,
@@ -1534,6 +2441,9 @@ window.ZAB = {
   pagePitch, furnitureCandidates,
   encodeWav, encodeMp3, toPcm16, concatFloat32, SAMPLE_RATE,
   crc32, dosDateTime, createZip, uniqueZipNames, blobToZipEntry, addTrack,
+  buildM4bBytes, encodeM4b,
+  htmlDocToMarkdown, epubFilesToMarkdown,
+  estimateBytes,
 };
 
 refresh();

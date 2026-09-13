@@ -6,6 +6,18 @@ a template for reporting what you find.
 Everything here refers to `zabaudiobooker.html`. See
 [MANUAL.md](MANUAL.md) if you have not opened it yet.
 
+**Start with [selftest.html](selftest.html).** Open it (served, not `file://`
+— see [MANUAL.md](MANUAL.md#serving-the-folder)) and click **▶ Run
+self-test**. It drives the real app end to end and checks everything a
+machine can check on its own — the Markdown/EPUB/PDF pipelines, the WAV/M4B/
+zip encoders, settings persistence, and a real generated audiobook — and
+only stops to ask you something when the answer genuinely needs a human ear
+or a real player, explaining why at each step. It finishes with a copyable
+report. It is a fast smoke test, not a replacement for the walkthrough
+below — run it first to catch anything obviously broken, then work through
+this checklist for the things only a human doing the whole workflow can
+judge.
+
 ---
 
 ## Why this needs your testing
@@ -28,11 +40,29 @@ Specifically unverified:
 
 - Downloading the model at all.
 - Whether `kokoro-js` behaves as its documentation claims (the streaming API,
-  the options passed to it, the shape of the audio it returns).
-- Whether WebGPU is detected and used.
+  the options passed to it, the shape of the audio it returns) — now from
+  inside a Web Worker rather than the main thread, which is itself unproven:
+  the worker's structure and its own copies of the encoders are covered by
+  the automated tests, but never with a real model loaded into it.
+- Whether WebGPU is detected and used, including inside a Worker — some
+  browsers support WebGPU on the main thread but not (yet) in a worker.
 - Whether MP3 encoding works — that library is loaded on demand and has never
   been loaded.
+- Whether an M4B file actually plays, and shows chapters, in real audiobook
+  apps and hardware players. The container format was verified byte-for-byte
+  (box structure, chapter offsets, title tag) with a synthetic PCM buffer;
+  no real player has ever opened one. Because it carries uncompressed PCM
+  rather than AAC (no encoder is embedded here), some strict "audiobook-only"
+  apps may refuse it even though general players (VLC, mpv, QuickTime) read
+  the format correctly.
 - Whether the voice list refreshes from the model after loading.
+- Whether a real-world EPUB — as opposed to the hand-built ones used for
+  testing — converts sensibly. The container/OPF/spine/toc parsing is
+  tested; a book from an actual retailer, with whatever quirks real
+  publishing pipelines introduce, is not.
+- Whether "install as an app" actually offers/works across browsers — it was
+  confirmed to register, activate and cache the shell, not that the browser's
+  own install prompt appears and behaves as expected.
 - Anything about how it feels to use on a real book.
 
 ---
@@ -85,6 +115,11 @@ rules are opinions — tell me where mine are wrong.
 - [ ] MP3 generates, downloads and plays in your normal music player.
 - [ ] WAV generates, downloads and plays.
 - [ ] File sizes look sane (MP3 roughly 1 MB per minute).
+- [ ] **M4B** generates as a single file (no separate chapter files, even
+      with a multi-chapter document) and plays. Confirm chapter markers
+      actually appear and are navigable — try it in more than one player
+      (e.g. VLC or a phone's audiobook/podcast app), since this is the least
+      proven part of the whole app (see above).
 - [ ] **Download all as .zip** produces one `.zip` that your OS opens
       normally, containing the complete book and every chapter file, and
       each one plays back correctly after extracting.
@@ -98,6 +133,11 @@ rules are opinions — tell me where mine are wrong.
 - [ ] Set **Device** to `WASM (CPU)` and generate something short. Slower, but
       it works.
 - [ ] Set **Precision** to `q8` and confirm it still works.
+- [ ] Click **▶ Preview** next to Voice. It downloads the model (first time)
+      and plays a short sample in the selected voice without generating a
+      full audiobook.
+- [ ] Change Voice, Speed and Format, then reload the page. All three come
+      back as you left them.
 
 ### 6. Robustness
 
@@ -128,6 +168,47 @@ invented, so this is where they meet reality.
 Tell me the ratio that matters: roughly how much of the converted text needed
 hand-fixing before it was worth listening to. That number decides whether the
 heuristics are good enough or need another pass.
+
+### 8. EPUB ingestion
+
+Use a real `.epub`, ideally one with a proper table of contents.
+
+- [ ] Dropping a `.epub` fills the Markdown box rather than erroring.
+- [ ] Chapters appear in the right order.
+- [ ] Chapter titles match the book's own table of contents, not generic
+      "Chapter 1", "Chapter 2" (unless the book genuinely has no ToC).
+- [ ] A cover page (usually just an image) doesn't show up as its own
+      near-empty audio file — it should be folded into the next chapter.
+- [ ] Any "not for distribution" / ad / bonus-content page some EPUBs include
+      is absent, if it was marked non-linear in the book.
+- [ ] Formatting inside a chapter — links, lists, tables, emphasis — behaves
+      the same way it does for a hand-written Markdown file.
+
+### 9. Batch mode
+
+- [ ] Drop two or three small `.md` files onto the box at once. A queue
+      appears above the text box instead of the text loading in directly.
+- [ ] Clicking a queued item loads its text into the box; edits there are
+      kept when you switch to another item and back.
+- [ ] The `×` on a queued item removes it; removing down to one item returns
+      to the normal single-document view (queue disappears).
+- [ ] The **Generate** button reads "Generate N audiobooks" with 2+ queued.
+      Clicking it produces every book's tracks, each under its own heading,
+      without redownloading the model between books.
+- [ ] **Download all as .zip** with a batch produces one zip with each book's
+      files under its own folder.
+- [ ] Dropping a single file with nothing queued still behaves exactly as
+      before — straight into the box, no queue shown.
+
+### 10. Installing as an app
+
+- [ ] Serve the folder (see [MANUAL.md](MANUAL.md#serving-the-folder)) rather
+      than opening the file directly, and reload once.
+- [ ] The browser offers to install the page (address-bar icon, or "Install…"
+      in its menu). Install it.
+- [ ] The installed app opens in its own window with no address bar.
+- [ ] Disconnect from the network and reopen the installed app. It still
+      opens (the page itself, not necessarily a not-yet-downloaded model).
 
 ---
 

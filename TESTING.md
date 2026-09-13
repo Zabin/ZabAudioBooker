@@ -44,8 +44,17 @@ Specifically unverified:
   inside a Web Worker rather than the main thread, which is itself unproven:
   the worker's structure and its own copies of the encoders are covered by
   the automated tests, but never with a real model loaded into it.
-- Whether WebGPU is detected and used, including inside a Worker — some
-  browsers support WebGPU on the main thread but not (yet) in a worker.
+- Whether WebGPU is actually used when it should be. The worker now
+  independently re-checks `requestAdapter()` from inside itself before
+  trusting the main thread's guess, and falls back to WASM with a visible
+  log line ("WebGPU wasn't usable here...") if that check or the model load
+  itself fails — this closes a real regression where the main thread's
+  `navigator.gpu` check didn't reflect whether WebGPU actually works inside
+  a worker, and generation could fail (or misreport which device it used)
+  as a result. The branching logic is unit-tested; a real browser where
+  WebGPU works on the main thread but not in a worker has not been used to
+  confirm the fallback triggers on genuine hardware, only that it triggers
+  correctly when no adapter is available at all (true of this sandbox).
 - Whether MP3 encoding works — that library is loaded on demand and has never
   been loaded.
 - Whether an M4B file actually plays, and shows chapters, in real audiobook

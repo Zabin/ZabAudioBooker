@@ -154,7 +154,7 @@ lists each book's tracks under its own heading, and **Download every file** /
 | A red box saying it could not load from the CDN | You are offline, or a firewall is blocking it. The first run needs access to `cdn.jsdelivr.net` and `huggingface.co`. Connect and reload the page. |
 | Nothing happens when you click Generate | Look for the red box. If there is none, open the browser console (see [Reporting problems](TESTING.md#how-to-capture-a-useful-error)) and check for errors. |
 | The page says the download is blocked from your filesystem | Follow the yellow hint on the page: it tells you how to serve the folder locally instead. |
-| It is very slow | Your browser is probably using the processor rather than the graphics card. This is normal and still works — expect roughly real time, so an hour of audio takes about an hour. |
+| It is very slow, or the status line said "WebGPU wasn't usable here" | Your browser's graphics card support didn't work out for this page, so it's using the processor instead. This happens automatically — nothing to do — and still works, just at roughly real time (an hour of audio takes about an hour) instead of a fraction of that. |
 | The browser tab crashes on a very long book | The audio is held in memory while it is made. Split the document and do a few chapters at a time. |
 
 ### Serving the folder

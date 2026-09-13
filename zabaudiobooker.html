@@ -1999,26 +1999,23 @@ const buildM4bBytes = ${buildM4bBytes.toString()};
 const encodeM4b = ${encodeM4b.toString()};
 
 let tts = null, ttsKey = "", TextSplitterStream = null, cancelled = false;
+let resolvedDevice = null; // what actually ended up running, which can differ from what was requested
 
-async function ensureModel(device, dtype) {
-  const key = device + "|" + dtype;
-  if (tts && ttsKey === key) return tts;
-  if (tts) {
-    try { tts.model?.dispose?.(); } catch {}
-    tts = null; ttsKey = "";
-  }
-  let mod;
+async function importKokoro() {
   try {
-    mod = await import(KOKORO_URL);
+    return await import(KOKORO_URL);
   } catch (e) {
     throw new Error(
       "Could not load kokoro-js from the CDN. The first run needs network access to " +
       "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
     );
   }
+}
+
+async function loadModel(mod, device, dtype) {
   TextSplitterStream = mod.TextSplitterStream;
   const seen = new Map();
-  tts = await mod.KokoroTTS.from_pretrained(MODEL_ID, {
+  return mod.KokoroTTS.from_pretrained(MODEL_ID, {
     dtype, device,
     progress_callback: p => {
       if (!p || !p.file) return;
@@ -2030,13 +2027,54 @@ async function ensureModel(device, dtype) {
       }
     },
   });
-  ttsKey = key;
+}
+
+// The main thread's "auto" device pick only checks navigator.gpu on the
+// MAIN thread, as a cheap hint before ever spinning up this worker — it
+// can't know whether WebGPU actually works from *inside* a worker, which
+// is less consistent across browsers than on the main thread. So this is
+// the one place that actually matters, and it always re-verifies for
+// itself rather than trusting that hint, falling back to WASM rather than
+// failing outright when WebGPU turns out not to work here after all.
+async function ensureModel(device, dtype) {
+  if (device === "webgpu") {
+    let usable = false;
+    try { usable = !!(self.navigator.gpu && await self.navigator.gpu.requestAdapter()); }
+    catch { usable = false; }
+    if (!usable) {
+      postMessage({ evt: "deviceFallback", requested: device, actual: "wasm",
+        reason: "WebGPU is not available from inside this browser's worker." });
+      device = "wasm"; dtype = "q8";
+    }
+  }
+
+  const key = device + "|" + dtype;
+  if (tts && ttsKey === key) { resolvedDevice = device; return tts; }
+  if (tts) {
+    try { tts.model?.dispose?.(); } catch {}
+    tts = null; ttsKey = "";
+  }
+
+  const mod = await importKokoro();
+  try {
+    tts = await loadModel(mod, device, dtype);
+  } catch (e) {
+    // The adapter existed but onnxruntime's WebGPU backend still failed to
+    // actually stand up a session — fall back once rather than fail the run.
+    if (device !== "webgpu") throw e;
+    postMessage({ evt: "deviceFallback", requested: device, actual: "wasm", reason: e.message || String(e) });
+    device = "wasm"; dtype = "q8";
+    tts = await loadModel(mod, device, dtype);
+  }
+  ttsKey = device + "|" + dtype;
+  resolvedDevice = device;
+
   let voices = [];
   try {
     const list = tts.list_voices?.();
     voices = Array.isArray(list) ? list : Object.keys(list || {});
   } catch {}
-  postMessage({ evt: "modelReady", voices });
+  postMessage({ evt: "modelReady", voices, device, dtype });
   return tts;
 }
 
@@ -2132,7 +2170,7 @@ self.onmessage = async (e) => {
       const elapsed = (Date.now() - t0) / 1000;
       const secs = full.length / SAMPLE_RATE;
       postMessage({ jobId, evt: "bookDone", buf, mime: blob.type, seconds: secs }, [buf]);
-      postMessage({ jobId, evt: "done", elapsed, secs, device });
+      postMessage({ jobId, evt: "done", elapsed, secs, device: resolvedDevice });
     } catch (err) {
       postMessage({ jobId, evt: "error", message: err.message || String(err) });
     }
@@ -2215,6 +2253,10 @@ function onWorkerMessage(msg) {
   if (msg.evt === "modelProgress") {
     progress(msg.loaded / msg.total);
     log(`Loading Kokoro-82M — ${(msg.loaded / 1048576).toFixed(1)} MB of ${(msg.total / 1048576).toFixed(1)} MB`);
+    return;
+  }
+  if (msg.evt === "deviceFallback") {
+    log(`WebGPU wasn't usable here (${msg.reason}) — continuing on WASM (CPU) instead. This will be slower but still works.`);
     return;
   }
   if (msg.evt === "modelReady") {
@@ -2324,6 +2366,7 @@ async function generate() {
   const device = pickDevice();
   const dtype = pickDtype(device);
   const t0 = performance.now();
+  let lastDevice = device; // updated below from what the worker actually used, which can differ (see deviceFallback)
 
   try {
     for (let bi = 0; bi < books.length; bi++) {
@@ -2345,12 +2388,16 @@ async function generate() {
       }
 
       const bookSlug = slugify(bookTitle, "book-" + (bi + 1));
-      await runGenerateJob(sections, { voice, speed, format: fmt, device, dtype, docTitle: bookTitle }, {
+      const result = await runGenerateJob(sections, { voice, speed, format: fmt, device, dtype, docTitle: bookTitle }, {
         bookLabel: books.length > 1 ? `Book ${bi + 1}/${books.length} — ` : "",
         bookIndex: bi, bookCount: books.length,
         flatPrefix: books.length > 1 ? `${bookSlug}-` : "",
         zipPrefix: books.length > 1 ? `${bookSlug}/` : "",
       });
+      // The worker may have silently fallen back off WebGPU (see the
+      // deviceFallback log line) — report what it actually ran on, not
+      // what was requested, so this line never claims a device it didn't use.
+      if (result?.device) lastDevice = result.device;
       if (cancelled) break;
     }
 
@@ -2358,7 +2405,7 @@ async function generate() {
 
     const elapsed = (performance.now() - t0) / 1000;
     log(`Done — ${books.length > 1 ? books.length + " books" : "audiobook"} generated in ` +
-        `${elapsed.toFixed(1)}s on ${device}.`);
+        `${elapsed.toFixed(1)}s on ${lastDevice}.`);
     progress(null);
   } catch (e) {
     console.error(e);

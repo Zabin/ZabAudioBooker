@@ -1,12 +1,14 @@
 /* Offline app shell for ZabAudioBooker.
  *
  * Caches only the page itself and its small local assets — not the model
- * weights or the CDN libraries (kokoro-js, lamejs, pdfjs, fflate). Those are
- * many megabytes, already cached by the browser's own HTTP cache and by
- * kokoro-js's own storage, and out of scope here: this service worker's job
- * is just "the app opens even with no network", not "the whole model is
- * guaranteed offline". Bump CACHE_NAME to ship a new shell version; the old
- * cache is dropped on activate.
+ * weights or the CDN libraries (kokoro-js, lamejs, pdfjs, fflate). The
+ * weights are many megabytes and are kept by the page itself, not here: see
+ * makeModelCache in zabaudiobooker.html, which stores them in Cache Storage
+ * (under the names "transformers-cache" and "kokoro-voices", never this
+ * file's) or in IndexedDB where Cache Storage is unusable. This service
+ * worker's job is just "the app opens even with no network", not "the whole
+ * model is guaranteed offline". Bump CACHE_NAME to ship a new shell version;
+ * the old cache is dropped on activate.
  */
 
 const CACHE_NAME = "zab-shell-v1";

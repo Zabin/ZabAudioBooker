@@ -287,6 +287,10 @@
       <button class="primary" id="go">Generate audiobook</button>
       <button id="cancel" class="hidden">Cancel</button>
     </div>
+    <div class="stats row" id="cacheRow" style="margin-top:12px; gap:8px">
+      <span id="cacheStatus"></span>
+      <button type="button" id="clearCache" class="small hidden" title="Delete the saved voice model from this browser. The next Generate downloads it again.">Clear saved model</button>
+    </div>
     <div class="bar hidden" id="barWrap"><i id="bar"></i></div>
     <div class="log" id="log"></div>
   </section>
@@ -1882,6 +1886,7 @@ const els = {
   go: $("go"), cancel: $("cancel"), bar: $("bar"), barWrap: $("barWrap"), log: $("log"),
   results: $("results"), tracks: $("tracks"), dlAll: $("dlAll"), dlZip: $("dlZip"),
   fileHint: $("fileHint"), fatal: $("fatal"),
+  cacheStatus: $("cacheStatus"), clearCache: $("clearCache"),
 };
 
 // Shown before the model loads; replaced by tts.list_voices() once it has.
@@ -2218,6 +2223,210 @@ for (const el of [els.md, els.split, els.maxChunk, els.code, els.tables, els.num
  * opening this file directly still works.
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Model-weight cache.
+ *
+ * transformers.js (underneath kokoro-js) saves the model in Cache Storage
+ * so a second run needn't download it again — but it treats that as
+ * strictly best-effort. If caches.open() throws, which browsers do on some
+ * file:// pages, in private windows and in iframes, it carries on with no
+ * cache and says nothing; a failed put() is only a console.warn; and a
+ * cache hit emits the same "X of Y MB" progress as a download, so the page
+ * cannot even tell which happened. The result is a model that quietly
+ * downloads again on every single run.
+ *
+ * makeModelCache() builds a stand-in for the global `caches` (the library
+ * looks it up by name, so no library internals are touched). Where Cache
+ * Storage works it simply uses it; where it doesn't it falls back to
+ * IndexedDB; and either way it reports hits, saves and failed saves
+ * through `emit`, so the page can say what actually happened. Written once
+ * and used unmodified in the tab and, via Function#toString(), in the
+ * worker — each has its own global `caches`, over the same storage.
+ * ------------------------------------------------------------------ */
+
+function makeModelCache({ native, idbFactory, emit, dbName = "zab-model-cache" }) {
+  // Only these are ours to list and clear. The service worker keeps its own
+  // app-shell cache in the same Cache Storage, which must never be touched.
+  const MODEL_CACHES = ["transformers-cache", "kokoro-voices"];
+  const PROBE = "zab-cache-probe";
+  let currentEmit = emit;
+  const say = e => { try { if (currentEmit) currentEmit(Object.assign({ evt: "cacheEvent" }, e)); } catch (_) {} };
+  const isUrl = k => /^https?:\/\//i.test(k);
+  const keyOf = r => (typeof r === "string" ? r : (r && r.url) || String(r));
+  const why = e => ((e && e.name) ? e.name + ": " : "") + ((e && e.message) || e);
+  const hits = new Set();
+
+  // ---- IndexedDB: the fallback store --------------------------------
+  let dbPromise = null;
+  function db() {
+    if (!dbPromise) {
+      dbPromise = new Promise((resolve, reject) => {
+        if (!idbFactory) { reject(new Error("IndexedDB is not available")); return; }
+        let req;
+        try { req = idbFactory.open(dbName, 1); } catch (e) { reject(e); return; }
+        req.onupgradeneeded = () => req.result.createObjectStore("files");
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => reject(new Error("IndexedDB is blocked"));
+      });
+    }
+    return dbPromise;
+  }
+  async function idbRun(mode, fn) {
+    const d = await db();
+    return new Promise((resolve, reject) => {
+      const t = d.transaction("files", mode);
+      const r = fn(t.objectStore("files"));
+      t.oncomplete = () => resolve(r ? r.result : undefined);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error || new Error("IndexedDB transaction aborted"));
+    });
+  }
+
+  // ---- Cache Storage: used only if it demonstrably works -------------
+  // "Visible" is not "usable": a page can have a `caches` object whose
+  // open() rejects. Writing and reading back a tiny entry is the only
+  // test that means anything.
+  async function nativeUsable() {
+    if (!native) return false;
+    try {
+      const c = await native.open(PROBE);
+      await c.put("https://zab.invalid/probe", new Response("ok"));
+      const ok = !!(await c.match("https://zab.invalid/probe"));
+      await native.delete(PROBE);
+      return ok;
+    } catch (_) { return false; }
+  }
+
+  let storeP = null;
+  const pickStore = () => storeP || (storeP = (async () => {
+    if (await nativeUsable()) { say({ kind: "store", store: "cache" }); return "cache"; }
+    try { await db(); say({ kind: "store", store: "idb" }); return "idb"; }
+    catch (e) { say({ kind: "store", store: "none", reason: why(e) }); return "none"; }
+  })());
+
+  const nativeHandles = new Map();
+  const nativeCache = name => {
+    if (!nativeHandles.has(name)) nativeHandles.set(name, native.open(name));
+    return nativeHandles.get(name);
+  };
+  const idbKey = (name, key) => name + "\n" + key;
+
+  function openCache(name) {
+    return {
+      async match(req) {
+        const key = keyOf(req);
+        const store = await pickStore();
+        let res;
+        try {
+          if (store === "cache") res = await (await nativeCache(name)).match(req);
+          else if (store === "idb") {
+            const rec = await idbRun("readonly", st => st.get(idbKey(name, key)));
+            if (rec) res = new Response(rec.blob, { status: rec.status, statusText: rec.statusText, headers: rec.headers });
+          }
+        } catch (_) { res = undefined; }
+        if (res && isUrl(key)) { hits.add(key); say({ kind: "hit", url: key, cache: name }); }
+        return res || undefined;
+      },
+      async put(req, res) {
+        const key = keyOf(req);
+        const store = await pickStore();
+        if (store === "none") return;
+        let bytes = Number(res.headers && res.headers.get("content-length")) || 0;
+        try {
+          if (store === "cache") await (await nativeCache(name)).put(req, res);
+          else {
+            const blob = await res.blob();
+            bytes = blob.size;
+            await idbRun("readwrite", st => st.put({
+              blob, size: blob.size, status: res.status, statusText: res.statusText,
+              headers: Array.from(res.headers.entries()),
+            }, idbKey(name, key)));
+          }
+        } catch (e) {
+          // Still thrown, so the library behaves exactly as before — but
+          // now the page hears about it too.
+          say({ kind: "saveFailed", url: key, cache: name, reason: why(e) });
+          throw e;
+        }
+        if (isUrl(key)) say({ kind: "saved", url: key, cache: name, store, bytes });
+      },
+    };
+  }
+
+  // What the page's own status line reads: one record per saved file.
+  async function inventory() {
+    const store = await pickStore();
+    const entries = [];
+    if (store === "cache") {
+      const have = await native.keys();
+      for (const name of MODEL_CACHES) {
+        if (!have.includes(name)) continue;
+        const c = await nativeCache(name);
+        for (const r of await c.keys()) {
+          let bytes = 0;
+          try { const m = await c.match(r); bytes = Number(m && m.headers.get("content-length")) || 0; } catch (_) {}
+          entries.push({ cache: name, url: r.url, bytes });
+        }
+      }
+    } else if (store === "idb") {
+      await idbRun("readonly", st => {
+        const req = st.openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (!cur) return;
+          const parts = String(cur.key).split("\n");
+          entries.push({ cache: parts[0], url: parts.slice(1).join("\n"), bytes: cur.value.size || 0 });
+          cur.continue();
+        };
+        return null;
+      });
+    }
+    return { store, entries };
+  }
+
+  async function clear() {
+    const store = await pickStore();
+    if (store === "cache") {
+      for (const name of MODEL_CACHES) { nativeHandles.delete(name); try { await native.delete(name); } catch (_) {} }
+    } else if (store === "idb") {
+      await idbRun("readwrite", st => st.clear());
+    }
+    hits.clear();
+  }
+
+  // The rest of the CacheStorage surface, kept minimal: nothing on the page
+  // but the library's open() ever calls these.
+  const storage = {
+    open: async name => openCache(name),
+    keys: async () => ((await pickStore()) === "cache" ? native.keys() : []),
+    has: async name => (await storage.keys()).includes(name),
+    delete: async name => ((await pickStore()) === "cache" ? native.delete(name) : false),
+    match: async () => undefined,
+  };
+  return Object.assign(storage, {
+    inventory, clear,
+    store: pickStore,
+    wasHit: file => { for (const u of hits) if (u.endsWith("/" + file)) return true; return false; },
+    setEmit: f => { currentEmit = f; },
+  });
+}
+
+// Puts the stand-in where the library will find it. Idempotent: a second
+// call (the next model load) only re-points where events are reported.
+function installModelCache(emit) {
+  const g = globalThis;
+  if (g.__zabModelCache) { g.__zabModelCache.setEmit(emit); return g.__zabModelCache; }
+  let native;
+  try { native = g.caches; } catch (_) { native = undefined; } // some browsers throw on mere access
+  try {
+    const mc = makeModelCache({ native, idbFactory: g.indexedDB, emit });
+    Object.defineProperty(g, "caches", { value: mc, configurable: true, writable: true });
+    g.__zabModelCache = mc;
+    return mc;
+  } catch (_) { return null; }
+}
+
 async function importKokoro() {
   try {
     return await import(KOKORO_URL);
@@ -2232,15 +2441,18 @@ async function importKokoro() {
 async function loadModel(mod, device, dtype, state, emit) {
   state.TextSplitterStream = mod.TextSplitterStream;
   const seen = new Map();
+  const mc = globalThis.__zabModelCache;
   return mod.KokoroTTS.from_pretrained(MODEL_ID, {
     dtype, device,
     progress_callback: p => {
       if (!p || !p.file) return;
       if (p.status === "progress" && p.total) {
-        seen.set(p.file, { loaded: p.loaded, total: p.total });
-        let loaded = 0, total = 0;
-        for (const v of seen.values()) { loaded += v.loaded; total += v.total; }
-        emit({ evt: "modelProgress", loaded, total });
+        // A cache hit reports "X of Y MB" exactly like a download does, so
+        // say which it was: the cache layer saw the hit before this fired.
+        seen.set(p.file, { loaded: p.loaded, total: p.total, cached: !!(mc && mc.wasHit(p.file)) });
+        let loaded = 0, total = 0, cached = true;
+        for (const v of seen.values()) { loaded += v.loaded; total += v.total; cached = cached && v.cached; }
+        emit({ evt: "modelProgress", loaded, total, fromCache: cached });
       }
     },
   });
@@ -2274,6 +2486,9 @@ async function ensureModel(device, dtype, state, emit) {
     state.tts = null; state.ttsKey = "";
   }
 
+  // Before the first import, not after: the library decides whether a
+  // cache exists at all at the moment it is first evaluated.
+  installModelCache(emit);
   const mod = await importKokoro();
   try {
     state.tts = await loadModel(mod, device, dtype, state, emit);
@@ -2436,6 +2651,8 @@ const MP4_MOVIE_TIMESCALE = ${MP4_MOVIE_TIMESCALE};
 const buildM4bBytes = ${buildM4bBytes.toString()};
 const encodeM4b = ${encodeM4b.toString()};
 
+const makeModelCache = ${makeModelCache.toString()};
+const installModelCache = ${installModelCache.toString()};
 const importKokoro = ${importKokoro.toString()};
 const loadModel = ${loadModel.toString()};
 const ensureModel = ${ensureModel.toString()};
@@ -2583,10 +2800,89 @@ function resetPreviewButton() {
   els.previewVoice.textContent = "▶ Preview";
 }
 
+/* ---- saved voice model: status line, clear button, persistence ---- */
+
+const modelCache = installModelCache(msg => onSynthesisEvent(msg));
+let cacheProblem = null; // why the browser isn't keeping the model, if it isn't
+let cacheStatusRun = 0;
+
+const shortName = url => String(url).split("/").slice(-2).join("/");
+
+function noteCacheEvent(msg) {
+  if (msg.kind === "store" && msg.store === "none") {
+    cacheProblem = "this browser isn't letting the page keep files" + (msg.reason ? " (" + msg.reason + ")" : "");
+  } else if (msg.kind === "saveFailed") {
+    cacheProblem = "the browser refused to save " + shortName(msg.url) + " (" + msg.reason + ")";
+  } else if (msg.kind === "saved" && /\.onnx$/i.test(msg.url)) {
+    cacheProblem = null;
+  }
+  refreshCacheStatus();
+}
+
+async function refreshCacheStatus() {
+  if (!modelCache) { els.cacheStatus.parentElement.classList.add("hidden"); return; }
+  const run = ++cacheStatusRun;
+  let inv = null;
+  try { inv = await modelCache.inventory(); } catch { inv = null; }
+  if (run !== cacheStatusRun) return; // a newer refresh is already in flight
+
+  const models = inv ? inv.entries.filter(e => /\.onnx$/i.test(e.url)) : [];
+  const bytes = models.reduce((n, e) => n + e.bytes, 0);
+  if (models.length) {
+    els.cacheStatus.textContent =
+      "Voice model saved on this device" + (bytes ? " (" + Math.round(bytes / 1048576) + " MB)" : "") +
+      " — it won't be downloaded again.";
+  } else if (cacheProblem) {
+    els.cacheStatus.textContent =
+      "⚠ Couldn't save the voice model: " + cacheProblem + ". It will download again on every run.";
+  } else {
+    els.cacheStatus.textContent =
+      "Voice model: not downloaded yet. The first Generate downloads it once and keeps it for next time.";
+  }
+  els.cacheStatus.title = inv && inv.store === "idb"
+    ? "Stored in IndexedDB — this browser wouldn't let the page use Cache Storage."
+    : "";
+  els.clearCache.classList.toggle("hidden", !models.length);
+}
+
+els.clearCache.addEventListener("click", async () => {
+  if (activeJob || previewInFlight) { // don't pull the model out from under a running job
+    fatal("Wait for the current job to finish, then clear the saved model.");
+    return;
+  }
+  if (!confirm("Delete the saved voice model? The next Generate will download it again.")) return;
+  try {
+    await modelCache.clear();
+    // Drop the copies already loaded in memory too, so the next run really
+    // starts from what is (no longer) on disk instead of silently reusing them.
+    resetWorker();
+    mainThreadState.tts = null; mainThreadState.ttsKey = "";
+    cacheProblem = null;
+  } catch (e) {
+    fatal("Couldn't clear the saved model: " + (e.message || e));
+  }
+  refreshCacheStatus();
+});
+
+// Best-effort storage can be evicted when the disk is short; asking for
+// persistence is free and, where granted, keeps the model through that.
+let persistAsked = false;
+function keepModelStorage() {
+  if (persistAsked) return;
+  persistAsked = true;
+  try { navigator.storage?.persist?.().catch(() => {}); } catch {}
+}
+
 function onSynthesisEvent(msg) {
+  if (msg.evt === "cacheEvent") { noteCacheEvent(msg); return; }
   if (msg.evt === "modelProgress") {
     progress(msg.loaded / msg.total);
-    log(`Loading Kokoro-82M — ${(msg.loaded / 1048576).toFixed(1)} MB of ${(msg.total / 1048576).toFixed(1)} MB`);
+    const lead = msg.fromCache
+      ? "Loading Kokoro-82M from this device's saved copy"
+      : cacheProblem
+        ? "Downloading Kokoro-82M"
+        : "Downloading Kokoro-82M (first run only — it's kept for next time)";
+    log(`${lead} — ${(msg.loaded / 1048576).toFixed(1)} MB of ${(msg.total / 1048576).toFixed(1)} MB`);
     return;
   }
   if (msg.evt === "deviceFallback") {
@@ -2597,6 +2893,7 @@ function onSynthesisEvent(msg) {
     if (msg.voices?.length) fillVoices([["Voices", msg.voices.map(id => [id, id])]], pendingVoice || els.voice.value);
     pendingVoice = null;
     progress(null);
+    refreshCacheStatus();
     return;
   }
   if (msg.evt === "previewDone") {
@@ -2697,6 +2994,7 @@ async function runGenerateJob(sections, settings, bookMeta) {
 els.previewVoice.addEventListener("click", async () => {
   if (activeJob || previewInFlight) return; // one job at a time; wait rather than interleave with it
   els.fatal.classList.add("hidden");
+  keepModelStorage();
   const sample = "This is what your audiobook will sound like.";
   previewInFlight = true;
   els.previewVoice.disabled = true;
@@ -2713,6 +3011,7 @@ els.previewVoice.addEventListener("click", async () => {
 async function generate() {
   cancelled = false;
   els.fatal.classList.add("hidden");
+  keepModelStorage();
   els.go.disabled = true;
   els.previewVoice.disabled = true; // one job at a time, worker or main thread
   els.cancel.classList.remove("hidden");
@@ -2877,6 +3176,7 @@ window.ZAB = {
   splitSections, mdToSpeech, slugify, decodeEntities, capLongRuns, MAX_RUN,
   MIN_SECTION_WORDS, wordCount, mergeShortSections, sectionsWithText,
   WORDS_PER_MINUTE, splitLongSections,
+  makeModelCache, installModelCache,
   pdfPagesToMarkdown, pdfExtractPages, pdfToMarkdown, looksScanned,
   isPrivateUse, codeRuns, digitPlan, decodePages, looksLetterspaced, rejoinSpacedText,
   bodySize, groupLines, lineText, normalizeGlyphs,
@@ -2890,6 +3190,7 @@ window.ZAB = {
 };
 
 refresh();
+refreshCacheStatus();
 window.dispatchEvent(new Event("zab-ready"));
 </script>
 </body>

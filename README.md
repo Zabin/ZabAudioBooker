@@ -48,8 +48,23 @@ npx serve .                         # or: python3 -m http.server 8000
 ```
 
 The first run downloads the model weights from Hugging Face (roughly 90 MB at
-`q8`, up to about 330 MB at `fp32`) and the browser caches them. Everything
-after that is offline.
+`q8`, up to about 330 MB at `fp32`) and saves them in your browser, so they are
+not downloaded again. Everything after that is offline.
+
+How they are saved is worth knowing, because it can fail quietly. The model
+library keeps them in Cache Storage but treats that as best-effort: if the
+browser refuses to open it (some `file://` pages, private windows, iframes) it
+carries on uncached without a word, and a cache hit looks identical to a
+download in the progress text — so the model can silently re-download on every
+run. The page therefore wraps that cache itself: it uses Cache Storage when it
+really works, falls back to IndexedDB when it doesn't, and says what happened.
+The line under **Generate** shows whether the model is saved on this device,
+warns if your browser won't keep it, and has a **Clear saved model** button;
+the progress text says "from this device's saved copy" or "Downloading … (first
+run only)". It also asks the browser for persistent storage so the copy isn't
+evicted when disk space runs low. Nothing can be kept in a private window that
+is closed afterwards — that is the browser discarding it, not something a page
+can prevent.
 
 Use Chrome or Edge if you have the choice — they have the best support for what
 this relies on. Safari and Firefox may work but are less tested.

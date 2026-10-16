@@ -204,6 +204,17 @@ rules are opinions — tell me where mine are wrong.
 - [ ] **Cancel** during a long run stops it promptly.
 - [ ] Generating twice in a row works, and the second run reuses the model
       without re-downloading.
+- [ ] The line under **Generate** reads "not downloaded yet" before the first
+      run and "Voice model saved on this device (… MB)" after it, and the
+      **Clear saved model** button only appears once it is saved.
+- [ ] Quit the browser completely, reopen the page, and generate. The progress
+      text says "from this device's saved copy" (not "Downloading"), and it
+      starts almost immediately. Check this both opened by double-click
+      (`file://`) and served (`http://localhost`).
+- [ ] In a private/incognito window, either the model is saved for the session
+      or the line under Generate says it couldn't be — it should never claim
+      "saved" and then re-download.
+- [ ] **Clear saved model**, then Generate: it downloads again.
 - [ ] A long document (30+ minutes of audio) completes without the tab dying.
 - [ ] Turn off your Wi-Fi after the model has downloaded once, reload the page,
       and generate. It should still work — that is the whole offline promise.

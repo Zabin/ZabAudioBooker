@@ -100,6 +100,13 @@ progress bar and a "Downloading model" message. This needs an internet
 connection and can take a few minutes.
 
 After that the model is saved in your browser, and everything works offline.
+The line under the **Generate audiobook** button tells you where things stand:
+"not downloaded yet" before the first run, then "Voice model saved on this
+device" once it has been kept. On later runs the progress text says it is
+loading from "this device's saved copy" instead of downloading. If instead you
+see a warning that the browser couldn't save it, the model will download again
+every run — this usually means a private/incognito window, or a browser setting
+that blocks sites from storing data.
 
 Once the download finishes, synthesis begins. The status line shows how much
 audio has been produced, how long it has taken, and an "RTF" figure — that is
@@ -190,9 +197,11 @@ the model downloaded at least once, same as always.
 
 ### Starting over
 
-To reclaim the space the downloaded model takes, clear your browser's site data
-for the page (in Chrome: **Settings → Privacy → Third-party cookies → See all
-site data**, then remove the entry). It will download again next time.
+To reclaim the space the downloaded model takes, click **Clear saved model**
+(next to the status line under the Generate button). It will download again
+next time. You can also clear your browser's site data for the page (in
+Chrome: **Settings → Privacy → Third-party cookies → See all site data**, then
+remove the entry), which removes it along with your remembered settings.
 
 ---
 

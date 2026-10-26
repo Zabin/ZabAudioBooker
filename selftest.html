@@ -523,6 +523,88 @@ step({
   },
 });
 
+step({
+  id: "modelcache", title: "Saved voice model survives, and failures are reported",
+  why: "Automated: the cache layer is driven against fake storage plus the real IndexedDB, including a second 'run' (a fresh instance) reading what the first one saved.",
+  kind: "auto",
+  run: async () => {
+    const { makeModelCache } = appWin.ZAB;
+    const URL1 = "https://huggingface.co/x/y/resolve/main/onnx/model.onnx";
+    const body = () => new appWin.Response(new Uint8Array(4096).fill(9), { headers: { "content-length": "4096" } });
+    const uniq = () => "zab-selftest-" + Math.random().toString(36).slice(2);
+    const events = () => { const ev = []; return { ev, emit: e => ev.push(e) }; };
+    const fakeNative = ({ failOpen = false, failPut = false } = {}) => {
+      const stores = new Map();
+      return {
+        async open(name) {
+          if (failOpen) throw new appWin.DOMException("blocked", "SecurityError");
+          if (!stores.has(name)) stores.set(name, new Map());
+          const m = stores.get(name);
+          const key = r => (typeof r === "string" ? r : r.url);
+          return {
+            async match(r) { const v = m.get(key(r)); return v ? v.clone() : undefined; },
+            async put(r, res) {
+              if (failPut && !key(r).includes("zab.invalid")) throw new appWin.DOMException("quota", "QuotaExceededError");
+              m.set(key(r), new appWin.Response(await res.arrayBuffer(), { headers: res.headers }));
+            },
+            async keys() { return [...m.keys()].map(url => ({ url })); },
+          };
+        },
+        async keys() { return [...stores.keys()]; },
+        async delete(n) { return stores.delete(n); },
+      };
+    };
+
+    // Cache Storage works: round trip, reported, listed, clearable.
+    const a = events();
+    const mc = makeModelCache({ native: fakeNative(), idbFactory: appWin.indexedDB, emit: a.emit, dbName: uniq() });
+    const c = await mc.open("transformers-cache");
+    assertTrue((await c.match(URL1)) === undefined, "a file that was never saved should miss");
+    await c.put(URL1, body());
+    assertEqual((await (await c.match(URL1)).arrayBuffer()).byteLength, 4096, "a saved file should come back whole");
+    assertTrue(a.ev.some(e => e.kind === "saved" && e.bytes === 4096), "a save should be reported with its size");
+    assertTrue(a.ev.some(e => e.kind === "hit"), "a hit should be reported");
+    assertTrue(mc.wasHit("onnx/model.onnx"), "the progress callback needs to be able to ask whether a file was a hit");
+    assertEqual((await mc.inventory()).entries.length, 1, "the status line should be able to list what is saved");
+    await mc.clear();
+    assertEqual((await mc.inventory()).entries.length, 0, "clearing should empty it");
+
+    // No Cache Storage: IndexedDB instead, and it has to outlive the instance (= the next page load).
+    const db = uniq();
+    await (await makeModelCache({ native: undefined, idbFactory: appWin.indexedDB, emit: null, dbName: db }).open("transformers-cache")).put(URL1, body());
+    const next = makeModelCache({ native: undefined, idbFactory: appWin.indexedDB, emit: null, dbName: db });
+    const back = await (await next.open("transformers-cache")).match(URL1);
+    assertTrue(!!back && (await back.arrayBuffer()).byteLength === 4096, "the IndexedDB fallback should still have the file on the next run");
+    assertEqual(back.headers.get("content-length"), "4096", "headers should survive the IndexedDB round trip");
+    await next.clear();
+
+    // Cache Storage visible but open() throws — the case the library silently shrugs off.
+    const viaIdb = makeModelCache({ native: fakeNative({ failOpen: true }), idbFactory: appWin.indexedDB, emit: null, dbName: uniq() });
+    await (await viaIdb.open("transformers-cache")).put(URL1, body());
+    assertEqual(await viaIdb.store(), "idb", "a Cache Storage that refuses to open should fall back to IndexedDB, not to nothing");
+    assertTrue(!!(await (await viaIdb.open("transformers-cache")).match(URL1)), "and the fallback should actually hold the file");
+
+    // A save that fails is reported to the page and still thrown to the library.
+    const q = events();
+    const quota = makeModelCache({ native: fakeNative({ failPut: true }), idbFactory: appWin.indexedDB, emit: q.emit, dbName: uniq() });
+    let threw = null;
+    try { await (await quota.open("transformers-cache")).put(URL1, body()); } catch (e) { threw = e; }
+    assertTrue(!!threw && threw.name === "QuotaExceededError", "the library should still see the rejection");
+    assertTrue(q.ev.some(e => e.kind === "saveFailed"), "the page should hear about the failed save");
+    assertTrue(!q.ev.some(e => e.kind === "saved"), "a failed save must not be reported as saved");
+
+    // Nothing usable anywhere: harmless, and reported once so the page can warn.
+    const n = events();
+    const none = makeModelCache({ native: undefined, idbFactory: undefined, emit: n.emit, dbName: uniq() });
+    const nc = await none.open("transformers-cache");
+    await nc.put(URL1, body());
+    assertTrue((await nc.match(URL1)) === undefined, "with no storage at all, nothing can come back");
+    assertTrue(n.ev.some(e => e.kind === "store" && e.store === "none"), "the page should be told nothing can be kept");
+
+    return "Saved files round-trip through Cache Storage and through IndexedDB (including into a fresh instance); failed saves are reported yet still thrown; no-storage is reported.";
+  },
+});
+
 group("End-to-end generation — needs network the first time");
 
 step({

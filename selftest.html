@@ -605,6 +605,81 @@ step({
   },
 });
 
+step({
+  id: "enginecache", title: "Engine files are saved and reused without the network",
+  why: "Automated: the saved-file loader is driven with a fake network and fake storage, so it never touches your real saved model or engine.",
+  kind: "auto",
+  run: async () => {
+    const { makeModelCache, assetBytes, importAsset } = appWin.ZAB;
+    const URL1 = "https://cdn.example.invalid/pkg@1.0.0/dist/mod.js";
+    const SRC = "export const answer = 42; export default 'ok';";
+
+    // Fake storage: the real cache layer over an in-memory Cache Storage.
+    const stores = new Map();
+    const native = {
+      async open(name) {
+        if (!stores.has(name)) stores.set(name, new Map());
+        const m = stores.get(name);
+        const key = r => (typeof r === "string" ? r : r.url);
+        return {
+          async match(r) { const v = m.get(key(r)); return v ? v.clone() : undefined; },
+          async put(r, res) { m.set(key(r), new appWin.Response(await res.arrayBuffer(), { headers: res.headers })); },
+          async keys() { return [...m.keys()].map(url => ({ url })); },
+        };
+      },
+      async keys() { return [...stores.keys()]; },
+      async delete(n) { return stores.delete(n); },
+    };
+    const caches = makeModelCache({ native, idbFactory: undefined, emit: null });
+
+    // Fake network that can be switched off, and counts what it was asked for.
+    let online = true, requests = 0;
+    const fetch = async () => {
+      requests++;
+      if (!online) throw new TypeError("Failed to fetch");
+      return new appWin.Response(SRC, { status: 200, headers: { "content-type": "text/javascript" } });
+    };
+    const env = { caches, fetch };
+    const events = [];
+
+    const first = await assetBytes(URL1, e => events.push(e), env);
+    assertEqual(new TextDecoder().decode(first), SRC, "the first call should return what the network served");
+    assertEqual(requests, 1, "the first call should have gone to the network once");
+    assertTrue(events.some(e => e.evt === "assetLoading" && e.fromCache === false), "it should report that this one is a download");
+
+    online = false; // from here on, the network is gone
+    const again = await assetBytes(URL1, e => events.push(e), env);
+    assertEqual(new TextDecoder().decode(again), SRC, "the second call should still return the file");
+    assertEqual(requests, 1, "the second call must not touch the network at all");
+    assertTrue(events.some(e => e.evt === "assetLoading" && e.fromCache === true), "it should report that this one came from the saved copy");
+
+    const inv = await caches.inventory();
+    const saved = inv.entries.find(e => e.url === URL1);
+    assertTrue(!!saved && saved.cache === "zab-assets", "the file should be listed among the saved engine files");
+    assertEqual(saved.bytes, SRC.length, "its saved size should be exact, because the status line reads it");
+
+    // Saved bytes must be loadable as a module, not merely retrievable.
+    const mod = await importAsset(URL1, null, env);
+    assertEqual(mod.answer, 42, "the saved bytes should load back as a working module");
+    assertEqual(requests, 1, "loading it must not touch the network either");
+
+    // Offline and never saved: fail, loudly, rather than hang or hand back nothing.
+    let failure = null;
+    try { await assetBytes("https://cdn.example.invalid/pkg@1.0.0/dist/other.js", null, env); } catch (e) { failure = e; }
+    assertTrue(!!failure, "a file that was never saved cannot come from nowhere when offline");
+
+    // A bad HTTP status must not be saved as though it were the file.
+    online = true;
+    const bad = { caches, fetch: async () => new appWin.Response("nope", { status: 500 }) };
+    let httpFailure = null;
+    try { await assetBytes("https://cdn.example.invalid/pkg@1.0.0/dist/broken.js", null, bad); } catch (e) { httpFailure = e; }
+    assertTrue(!!httpFailure && /HTTP 500/.test(httpFailure.message), "an HTTP error should be reported");
+    assertTrue(!(await caches.inventory()).entries.some(e => e.url.endsWith("broken.js")), "and must not be saved");
+
+    return "A file downloads once, is saved with its exact size, then loads from the saved copy with the network off; unsaved-and-offline and HTTP errors both fail loudly and save nothing.";
+  },
+});
+
 group("End-to-end generation — needs network the first time");
 
 step({

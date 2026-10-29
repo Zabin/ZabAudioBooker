@@ -47,9 +47,26 @@ npx serve .                         # or: python3 -m http.server 8000
 # then visit the URL it prints, e.g. http://localhost:8000/zabaudiobooker.html
 ```
 
-The first run downloads the model weights from Hugging Face (roughly 90 MB at
-`q8`, up to about 330 MB at `fp32`) and saves them in your browser, so they are
-not downloaded again. Everything after that is offline.
+The first run downloads two things and saves both in your browser: the model
+weights from Hugging Face (roughly 90 MB at `q8`, up to about 330 MB at `fp32`),
+and the speech engine from jsDelivr (about 24 MB: the kokoro-js module, the ONNX
+runtime's 21 MB WebAssembly binary, and the MP3 encoder). After that nothing is
+downloaded again and generating needs no internet.
+
+The engine matters as much as the model. An earlier version saved only the
+model, so a run with the model already on disk still tried to fetch kokoro-js
+from the CDN and failed offline with "Could not load kokoro-js from the CDN" —
+the browser's own HTTP cache doesn't promise to keep CDN files, and the runtime
+alone is 21 MB. The page now keeps the engine in the same store as the model
+(Cache Storage, or IndexedDB where that isn't allowed), which — unlike a service
+worker — also works when the file is opened by double-click. It loads
+kokoro-js from the package's own single-file browser build
+(`dist/kokoro.web.js`) rather than jsDelivr's `+esm` bundling, which is a graph
+of several modules resolved to whatever is newest and can't be saved and
+reloaded; the old route remains as a fallback, and the page warns you if it ever
+has to use it, because that route can't work offline. The ONNX runtime is the
+same build either way (`1.22.0-dev.20250409`); only transformers.js's own
+wrapper differs (3.5.1 baked into that file, versus the newest 3.x).
 
 How they are saved is worth knowing, because it can fail quietly. The model
 library keeps them in Cache Storage but treats that as best-effort: if the
@@ -58,11 +75,12 @@ carries on uncached without a word, and a cache hit looks identical to a
 download in the progress text — so the model can silently re-download on every
 run. The page therefore wraps that cache itself: it uses Cache Storage when it
 really works, falls back to IndexedDB when it doesn't, and says what happened.
-The line under **Generate** shows whether the model is saved on this device,
-warns if your browser won't keep it, and has a **Clear saved model** button;
-the progress text says "from this device's saved copy" or "Downloading … (first
-run only)". It also asks the browser for persistent storage so the copy isn't
-evicted when disk space runs low. Nothing can be kept in a private window that
+The line under **Generate** shows whether the model *and* engine are saved on
+this device ("works without internet"), warns if your browser won't keep them,
+and has a **Clear saved files** button; the progress text says "from this
+device's saved copy" or "Downloading … (first run only)". It also asks the
+browser for persistent storage so the copy isn't evicted when disk space runs
+low. Nothing can be kept in a private window that
 is closed afterwards — that is the browser discarding it, not something a page
 can prevent.
 
@@ -72,9 +90,13 @@ this relies on. Safari and Firefox may work but are less tested.
 ### Requirements
 
 A current browser and, on first run only, network access to `cdn.jsdelivr.net`
-(for [kokoro-js](https://www.npmjs.com/package/kokoro-js), the MP3 encoder,
-and — only if you open an EPUB — the unzip library) and `huggingface.co` (for
-the weights). Audio is held in memory while it is generated, so a very long
+(for [kokoro-js](https://www.npmjs.com/package/kokoro-js), its WebAssembly
+runtime, and the MP3 encoder) and `huggingface.co` (for the weights); all of
+that is saved on the first run, so later runs need none. The two optional
+readers are the exception: opening a PDF loads pdf.js, and opening an EPUB
+loads the unzip library, from the CDN when first used — those are **not** saved
+yet, so importing a PDF or EPUB needs internet (generating from text you
+already have in the box does not). Audio is held in memory while it is generated, so a very long
 book on a low-memory machine is better done a few chapters at a time — or
 lower **Max chunk length** (see Output below) so no single piece gets too
 large regardless of how the document is split into chapters.
@@ -306,11 +328,11 @@ or a browser menu item — "Install ZabAudioBooker" / "Add to Home Screen"),
 after which it opens in its own window with no address bar, works with no
 network at all, and keeps working across a restart.
 
-This covers the *app*, not the *model*: the Kokoro weights are still a
-separate, much larger download the first time you actually generate
-something, cached by the browser as already described. Nothing here changes
-the offline story above — it just means the page itself no longer needs a
-network fetch to open.
+This covers the *app* only: the page, its manifest and its icon. The Kokoro
+weights and the speech engine are separate, much larger downloads the first
+time you actually generate something, and the page saves them itself as
+described above — the same way whether it is opened as a file or served — so
+nothing in the service worker is needed for them.
 
 ## Project layout
 

@@ -205,8 +205,9 @@ rules are opinions — tell me where mine are wrong.
 - [ ] Generating twice in a row works, and the second run reuses the model
       without re-downloading.
 - [ ] The line under **Generate** reads "not downloaded yet" before the first
-      run and "Voice model saved on this device (… MB)" after it, and the
-      **Clear saved model** button only appears once it is saved.
+      run and "Voice model and speech engine saved on this device (… MB) —
+      works without internet" after it, and the **Clear saved files** button
+      only appears once something is saved.
 - [ ] Quit the browser completely, reopen the page, and generate. The progress
       text says "from this device's saved copy" (not "Downloading"), and it
       starts almost immediately. Check this both opened by double-click
@@ -214,10 +215,17 @@ rules are opinions — tell me where mine are wrong.
 - [ ] In a private/incognito window, either the model is saved for the session
       or the line under Generate says it couldn't be — it should never claim
       "saved" and then re-download.
-- [ ] **Clear saved model**, then Generate: it downloads again.
+- [ ] **Clear saved files**, then Generate: it downloads both again.
 - [ ] A long document (30+ minutes of audio) completes without the tab dying.
-- [ ] Turn off your Wi-Fi after the model has downloaded once, reload the page,
-      and generate. It should still work — that is the whole offline promise.
+- [ ] **The offline promise.** After one full online Generate (the line under
+      the button says "works without internet"), turn off your Wi-Fi, reload the
+      page, and generate — once as WAV and once as MP3, since the MP3 encoder is
+      a separate file. It should work and never show "Could not load … from the
+      CDN". Do this both opened by double-click (`file://`) and served.
+- [ ] Coming from a build that saved only the model: the line says the speech
+      engine isn't saved yet; one online Generate fixes it; then offline works.
+- [ ] Opening a **PDF** or **EPUB** while offline does fail (their readers are
+      not saved) with a message saying so — that is expected, not a regression.
 
 ### 7. PDF ingestion
 

@@ -289,7 +289,7 @@
     </div>
     <div class="stats row" id="cacheRow" style="margin-top:12px; gap:8px">
       <span id="cacheStatus"></span>
-      <button type="button" id="clearCache" class="small hidden" title="Delete the saved voice model from this browser. The next Generate downloads it again.">Clear saved model</button>
+      <button type="button" id="clearCache" class="small hidden" title="Delete the saved voice model and speech engine from this browser. The next Generate downloads them again.">Clear saved files</button>
     </div>
     <div class="bar hidden" id="barWrap"><i id="bar"></i></div>
     <div class="log" id="log"></div>
@@ -308,8 +308,15 @@
 <script type="module">
 const SAMPLE_RATE = 24000;
 const MODEL_ID    = "onnx-community/Kokoro-82M-v1.0-ONNX";
-const KOKORO_URL  = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm";
-const LAMEJS_URL  = "https://cdn.jsdelivr.net/npm/@breezystack/lamejs@1.2.7/+esm";
+// The speech engine and MP3 encoder are loaded from the package's own
+// single-file builds rather than jsdelivr's "+esm" bundling: a "+esm" URL is a
+// graph of several modules (resolved to whatever is newest at the time), which
+// cannot be saved and loaded back offline, whereas each of these is one file
+// with no imports, so its bytes can be kept on this device. KOKORO_ESM_URL is
+// the old route, kept only as a fallback if the saved-file route fails.
+const KOKORO_URL     = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/dist/kokoro.web.js";
+const KOKORO_ESM_URL = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm";
+const LAMEJS_URL     = "https://cdn.jsdelivr.net/npm/@breezystack/lamejs@1.2.7/dist/lamejs.js";
 const FFLATE_URL  = "https://cdn.jsdelivr.net/npm/fflate@0.8.2/+esm";
 
 /* ------------------------------------------------------------------ *
@@ -1504,13 +1511,16 @@ function encodeWav(float32, sampleRate = SAMPLE_RATE) {
 
 let lamePromise = null;
 async function encodeMp3(float32, sampleRate = SAMPLE_RATE, kbps = 128) {
-  lamePromise ||= import(LAMEJS_URL);
+  lamePromise ||= importAsset(LAMEJS_URL);
   let lame;
   try {
     lame = await lamePromise;
   } catch (e) {
     lamePromise = null;
-    throw new Error("Could not load the MP3 encoder from the CDN. Choose WAV instead, or retry online. " + e.message);
+    throw new Error(
+      "Could not load the MP3 encoder. It isn't saved on this device yet and the internet isn't " +
+      "reachable. Choose WAV instead, or connect once and retry. " + e.message
+    );
   }
   const Mp3Encoder = lame.Mp3Encoder || lame.default?.Mp3Encoder;
   if (!Mp3Encoder) throw new Error("lamejs loaded but exposed no Mp3Encoder.");
@@ -2247,7 +2257,7 @@ for (const el of [els.md, els.split, els.maxChunk, els.code, els.tables, els.num
 function makeModelCache({ native, idbFactory, emit, dbName = "zab-model-cache" }) {
   // Only these are ours to list and clear. The service worker keeps its own
   // app-shell cache in the same Cache Storage, which must never be touched.
-  const MODEL_CACHES = ["transformers-cache", "kokoro-voices"];
+  const MODEL_CACHES = ["transformers-cache", "kokoro-voices", "zab-assets"];
   const PROBE = "zab-cache-probe";
   let currentEmit = emit;
   const say = e => { try { if (currentEmit) currentEmit(Object.assign({ evt: "cacheEvent" }, e)); } catch (_) {} };
@@ -2427,15 +2437,103 @@ function installModelCache(emit) {
   } catch (_) { return null; }
 }
 
-async function importKokoro() {
-  try {
-    return await import(KOKORO_URL);
-  } catch (e) {
-    throw new Error(
-      "Could not load kokoro-js from the CDN. The first run needs network access to " +
-      "cdn.jsdelivr.net and huggingface.co — check your connection and reload. " + e.message
-    );
+/* ------------------------------------------------------------------ *
+ * The speech engine's own files, kept on this device.
+ *
+ * A saved voice model is only half of what a run needs. Every run also
+ * pulls the engine itself from the CDN: the kokoro-js module, the ONNX
+ * runtime's loader and its 21 MB WebAssembly binary, and the MP3 encoder.
+ * Nothing saved those, so with the model already on disk the page still
+ * needed the internet — unless the browser's own HTTP cache happened to
+ * still hold them, which it never promises to.
+ *
+ * assetBytes() fetches a file *through the persistent cache* — the same one
+ * the model uses, so it works from file:// too, where a service worker
+ * can't — and assetUrl()/importAsset() load it back from those saved bytes
+ * as a blob: URL. These are written once and used unmodified in the tab and,
+ * via Function#toString(), in the worker, like the cache layer itself.
+ * ------------------------------------------------------------------ */
+
+// `env` is only ever overridden by tests, so they can supply a fake network
+// and fake storage instead of touching the real saved files.
+async function assetBytes(url, emit, env = globalThis) {
+  const cache = env.caches ? await env.caches.open("zab-assets") : null;
+  const saved = cache ? await cache.match(url) : undefined;
+  if (emit) emit({ evt: "assetLoading", url, fromCache: !!saved });
+  if (saved) return saved.arrayBuffer();
+
+  const res = await env.fetch(url);
+  if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
+  const buf = await res.arrayBuffer();
+  if (cache) {
+    try {
+      // Rebuilt rather than cloned so it carries an exact content-length,
+      // which is where the status line reads the saved size from.
+      await cache.put(url, new Response(buf, { headers: {
+        "content-type": res.headers.get("content-type") || "application/octet-stream",
+        "content-length": String(buf.byteLength),
+      } }));
+    } catch (_) { /* not saving is a loss, not a failure: this run still works */ }
   }
+  return buf;
+}
+
+async function assetUrl(url, type, emit, env) {
+  return URL.createObjectURL(new Blob([await assetBytes(url, emit, env)], { type }));
+}
+
+async function importAsset(url, emit, env) {
+  return import(await assetUrl(url, "text/javascript", emit, env));
+}
+
+// One engine instance per context, however many times a model is (re)loaded —
+// exactly what import(url) gave before, since a module is evaluated once. Each
+// call here would otherwise mint fresh blob: URLs and re-evaluate the whole
+// 2 MB engine (and its WebAssembly runtime), leaking ~24 MB a time, and would
+// change the runtime's per-module state that the WebGPU fallback logic relies on.
+function importKokoro(emit) {
+  const g = globalThis;
+  if (!g.__zabEngine) {
+    g.__zabEngine = loadEngine(emit).catch(e => { g.__zabEngine = null; throw e; });
+  }
+  return g.__zabEngine;
+}
+
+async function loadEngine(emit) {
+  let mod;
+  try {
+    mod = await importAsset(KOKORO_URL, emit);
+    // By default the runtime fetches its own loader and WebAssembly binary
+    // from a CDN folder the first time it needs them. wasmPaths also accepts
+    // the two files directly, so hand it the saved copies instead.
+    const base = mod.env && mod.env.wasmPaths;
+    if (typeof base === "string") {
+      const [mjs, wasm] = await Promise.all([
+        assetUrl(base + "ort-wasm-simd-threaded.jsep.mjs", "text/javascript", emit),
+        assetUrl(base + "ort-wasm-simd-threaded.jsep.wasm", "application/wasm", emit),
+      ]);
+      mod.env.wasmPaths = { mjs, wasm };
+    }
+  } catch (e) {
+    // The original route: slower to set up and unable to work offline, but
+    // known to run, so a problem with the saved-file route degrades to the
+    // old behaviour instead of breaking generation outright.
+    try {
+      mod = await import(KOKORO_ESM_URL);
+    } catch (e2) {
+      throw new Error(
+        "Couldn't load the speech engine. It isn't saved on this device yet and the internet " +
+        "isn't reachable — connect once and try again; after that it works without internet. (" +
+        ((e && e.message) || e) + ")"
+      );
+    }
+    if (emit) emit({ evt: "cacheEvent", kind: "engineFallback", reason: (e && e.message) || String(e) });
+  }
+  // The MP3 encoder is only needed at the very end of a run, but an online
+  // first run is the only chance to have it for an offline one — so keep it
+  // now, quietly, rather than finding it missing mid-book.
+  assetBytes(LAMEJS_URL).catch(() => {});
+  return mod;
 }
 
 async function loadModel(mod, device, dtype, state, emit) {
@@ -2489,7 +2587,7 @@ async function ensureModel(device, dtype, state, emit) {
   // Before the first import, not after: the library decides whether a
   // cache exists at all at the moment it is first evaluated.
   installModelCache(emit);
-  const mod = await importKokoro();
+  const mod = await importKokoro(emit);
   try {
     state.tts = await loadModel(mod, device, dtype, state, emit);
   } catch (e) {
@@ -2630,6 +2728,7 @@ const WORKER_SRC = `
 const SAMPLE_RATE = ${SAMPLE_RATE};
 const MODEL_ID = ${JSON.stringify(MODEL_ID)};
 const KOKORO_URL = ${JSON.stringify(KOKORO_URL)};
+const KOKORO_ESM_URL = ${JSON.stringify(KOKORO_ESM_URL)};
 const LAMEJS_URL = ${JSON.stringify(LAMEJS_URL)};
 let lamePromise = null;
 
@@ -2653,6 +2752,10 @@ const encodeM4b = ${encodeM4b.toString()};
 
 const makeModelCache = ${makeModelCache.toString()};
 const installModelCache = ${installModelCache.toString()};
+const assetBytes = ${assetBytes.toString()};
+const assetUrl = ${assetUrl.toString()};
+const importAsset = ${importAsset.toString()};
+const loadEngine = ${loadEngine.toString()};
 const importKokoro = ${importKokoro.toString()};
 const loadModel = ${loadModel.toString()};
 const ensureModel = ${ensureModel.toString()};
@@ -2804,6 +2907,10 @@ function resetPreviewButton() {
 
 const modelCache = installModelCache(msg => onSynthesisEvent(msg));
 let cacheProblem = null; // why the browser isn't keeping the model, if it isn't
+// Tracked apart from cacheProblem on purpose: the engine loads *before* the
+// model, so a shared variable would be cleared by the model's later, successful
+// save and hide that the engine is still not being kept.
+let engineProblem = null;
 let cacheStatusRun = 0;
 
 const shortName = url => String(url).split("/").slice(-2).join("/");
@@ -2813,6 +2920,11 @@ function noteCacheEvent(msg) {
     cacheProblem = "this browser isn't letting the page keep files" + (msg.reason ? " (" + msg.reason + ")" : "");
   } else if (msg.kind === "saveFailed") {
     cacheProblem = "the browser refused to save " + shortName(msg.url) + " (" + msg.reason + ")";
+  } else if (msg.kind === "engineFallback") {
+    engineProblem = "the speech engine couldn't be loaded from its saved copy (" + msg.reason + "), so it was fetched from " +
+      "the internet instead and will be again on every run — it won't work offline until that is sorted out";
+  } else if ((msg.kind === "saved" || msg.kind === "hit") && /kokoro\.web\.js$/i.test(msg.url)) {
+    engineProblem = null; // the saved-file route worked this time
   } else if (msg.kind === "saved" && /\.onnx$/i.test(msg.url)) {
     cacheProblem = null;
   }
@@ -2826,40 +2938,52 @@ async function refreshCacheStatus() {
   try { inv = await modelCache.inventory(); } catch { inv = null; }
   if (run !== cacheStatusRun) return; // a newer refresh is already in flight
 
-  const models = inv ? inv.entries.filter(e => /\.onnx$/i.test(e.url)) : [];
-  const bytes = models.reduce((n, e) => n + e.bytes, 0);
-  if (models.length) {
-    els.cacheStatus.textContent =
-      "Voice model saved on this device" + (bytes ? " (" + Math.round(bytes / 1048576) + " MB)" : "") +
-      " — it won't be downloaded again.";
+  const entries = inv ? inv.entries : [];
+  const models = entries.filter(e => /\.onnx$/i.test(e.url));
+  const engine = entries.filter(e => e.cache === "zab-assets");
+  // "Works without internet" needs the engine too, not just the model.
+  const engineSaved = engine.some(e => /kokoro\.web\.js$/i.test(e.url)) && engine.some(e => /\.wasm$/i.test(e.url));
+  const total = models.concat(engine).reduce((n, e) => n + e.bytes, 0);
+  const sentence = t => t.charAt(0).toUpperCase() + t.slice(1) + ".";
+  let text;
+  if (models.length && engineSaved && !engineProblem) {
+    text = "Voice model and speech engine saved on this device" +
+      (total ? " (" + Math.round(total / 1048576) + " MB)" : "") + " — works without internet.";
+  } else if (models.length && engineProblem) {
+    text = "Voice model saved on this device. ⚠ " + sentence(engineProblem);
+  } else if (models.length) {
+    text = "Voice model saved on this device. The speech engine (about 24 MB) isn't saved yet — the next " +
+      "Generate downloads it once, and after that this works without internet.";
   } else if (cacheProblem) {
-    els.cacheStatus.textContent =
-      "⚠ Couldn't save the voice model: " + cacheProblem + ". It will download again on every run.";
+    text = "⚠ Couldn't save the voice model: " + cacheProblem + ". It will download again on every run.";
   } else {
-    els.cacheStatus.textContent =
-      "Voice model: not downloaded yet. The first Generate downloads it once and keeps it for next time.";
+    text = "Voice model and speech engine: not downloaded yet. The first Generate downloads them once " +
+      "(roughly 115–350 MB depending on precision) and keeps them, so later runs work without internet.";
   }
+  if (models.length && cacheProblem) text += " ⚠ " + sentence(cacheProblem);
+  els.cacheStatus.textContent = text;
   els.cacheStatus.title = inv && inv.store === "idb"
     ? "Stored in IndexedDB — this browser wouldn't let the page use Cache Storage."
     : "";
-  els.clearCache.classList.toggle("hidden", !models.length);
+  els.clearCache.classList.toggle("hidden", !(models.length || engine.length));
 }
 
 els.clearCache.addEventListener("click", async () => {
   if (activeJob || previewInFlight) { // don't pull the model out from under a running job
-    fatal("Wait for the current job to finish, then clear the saved model.");
+    fatal("Wait for the current job to finish, then clear the saved files.");
     return;
   }
-  if (!confirm("Delete the saved voice model? The next Generate will download it again.")) return;
+  if (!confirm("Delete the saved voice model and speech engine? The next Generate will download them again.")) return;
   try {
     await modelCache.clear();
     // Drop the copies already loaded in memory too, so the next run really
     // starts from what is (no longer) on disk instead of silently reusing them.
     resetWorker();
     mainThreadState.tts = null; mainThreadState.ttsKey = "";
-    cacheProblem = null;
+    globalThis.__zabEngine = null;
+    cacheProblem = null; engineProblem = null;
   } catch (e) {
-    fatal("Couldn't clear the saved model: " + (e.message || e));
+    fatal("Couldn't clear the saved files: " + (e.message || e));
   }
   refreshCacheStatus();
 });
@@ -2875,6 +2999,12 @@ function keepModelStorage() {
 
 function onSynthesisEvent(msg) {
   if (msg.evt === "cacheEvent") { noteCacheEvent(msg); return; }
+  if (msg.evt === "assetLoading") {
+    log(msg.fromCache
+      ? "Loading the speech engine from this device's saved copy…"
+      : "Downloading the speech engine (about 24 MB, first run only — it's kept for next time)…");
+    return;
+  }
   if (msg.evt === "modelProgress") {
     progress(msg.loaded / msg.total);
     const lead = msg.fromCache
@@ -3176,7 +3306,7 @@ window.ZAB = {
   splitSections, mdToSpeech, slugify, decodeEntities, capLongRuns, MAX_RUN,
   MIN_SECTION_WORDS, wordCount, mergeShortSections, sectionsWithText,
   WORDS_PER_MINUTE, splitLongSections,
-  makeModelCache, installModelCache,
+  makeModelCache, installModelCache, assetBytes, assetUrl, importAsset,
   pdfPagesToMarkdown, pdfExtractPages, pdfToMarkdown, looksScanned,
   isPrivateUse, codeRuns, digitPlan, decodePages, looksLetterspaced, rejoinSpacedText,
   bodySize, groupLines, lineText, normalizeGlyphs,

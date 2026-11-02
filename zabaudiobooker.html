@@ -503,20 +503,30 @@ function endSentence(s) { return /[.!?]["')\]]?$/.test(s) ? s : s + "."; }
 // when feeding the model, not in the preview, which shows the readable text.
 const MAX_RUN = 300; // characters; conservative, since symbols phonemize long
 
+// A period between two digits (2.5 million, Section 1.1, 3.10.2) is part of
+// the number, not the end of a sentence. Cutting there and rejoining with a
+// space made "2. 5 million", which the splitter then treated as two sentences.
+const SENTENCE_UNIT = /(?:[^.!?]|(?<=\d)\.(?=\d))*(?:[.!?]+\s*|$)/g;
+
+// Text is returned untouched unless a run is actually too long: only those get
+// cut, and only between words.
 function capLongRuns(text, max = MAX_RUN) {
-  const out = [];
-  for (const unit of text.match(/[^.!?]+[.!?]*\s*/g) || [text]) {
-    let rest = unit.trim();
-    if (!rest) continue;
+  let out = "";
+  for (const unit of text.match(SENTENCE_UNIT) || [text]) {
+    const body = unit.trimEnd();
+    if (body.length <= max) { out += unit; continue; }
+    const tail = unit.slice(body.length);
+    let rest = body, pieces = [];
     while (rest.length > max) {
       let cut = rest.lastIndexOf(" ", max);
       if (cut <= 0) cut = max;          // a single unbroken token: cut it anyway
-      out.push(endSentence(rest.slice(0, cut).trim()));
+      pieces.push(endSentence(rest.slice(0, cut).trim()));
       rest = rest.slice(cut).trim();
     }
-    if (rest) out.push(rest);
+    if (rest) pieces.push(rest);
+    out += pieces.join(" ") + tail;
   }
-  return out.join(" ");
+  return out;
 }
 
 function tokensToSpeech(tokens, opts = {}) {
@@ -634,7 +644,7 @@ function splitLongSections(sections, maxWords) {
     const atoms = []; // { text, endsParagraph }: the separator to its right
     for (const block of s.text.split("\n\n")) {
       if (wordCount(block) <= maxWords) { atoms.push({ text: block, endsParagraph: true }); continue; }
-      const sentences = (block.match(/[^.!?]+[.!?]*\s*/g) || [block]).map(x => x.trim()).filter(Boolean);
+      const sentences = (block.match(SENTENCE_UNIT) || [block]).map(x => x.trim()).filter(Boolean);
       sentences.forEach((text, i) => atoms.push({ text, endsParagraph: i === sentences.length - 1 }));
     }
 

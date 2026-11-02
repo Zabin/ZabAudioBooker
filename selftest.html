@@ -524,6 +524,21 @@ step({
 });
 
 step({
+  id: "numbers", title: "Numbers and abbreviations are not read as sentence ends",
+  why: "Automated: the text that reaches the voice must keep 2.5, 1.1 and U.S. intact. Cutting at every period used to turn '2.5 Million' into '2. 5 Million'.",
+  kind: "auto",
+  run: async () => {
+    const { capLongRuns } = appWin.ZAB;
+    for (const t of ["Funding of 2.5 Million was approved.", "See Section 1.1 for details.", "Version 3.10.2 shipped. It cost $4.50.", "The U.S. and Dr. Smith agreed.\n\nNext one."])
+      assertEqual(capLongRuns(t), t, "short text should pass through unchanged");
+    const long = "word ".repeat(70).trim() + " costs 2.5 million. Next.";
+    const out = capLongRuns(long);
+    assertTrue(out.includes("costs 2.5 million."), "a number in an over-long run should survive the cut");
+    assertTrue(out.split(/(?<=[.!?]) /).every(x => x.length <= 320), "an over-long run should still be cut into short sentences");
+  },
+});
+
+step({
   id: "modelcache", title: "Saved voice model survives, and failures are reported",
   why: "Automated: the cache layer is driven against fake storage plus the real IndexedDB, including a second 'run' (a fresh instance) reading what the first one saved.",
   kind: "auto",

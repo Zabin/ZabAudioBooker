@@ -2,13 +2,16 @@
  *
  * Caches only the page itself and its small local assets — not the model
  * weights or the CDN libraries (kokoro-js, lamejs, pdfjs, fflate). The
- * weights are many megabytes and are kept by the page itself, not here: see
- * makeModelCache in zabaudiobooker.html, which stores them in Cache Storage
- * (under the names "transformers-cache" and "kokoro-voices", never this
- * file's) or in IndexedDB where Cache Storage is unusable. This service
- * worker's job is just "the app opens even with no network", not "the whole
- * model is guaranteed offline". Bump CACHE_NAME to ship a new shell version;
- * the old cache is dropped on activate.
+ * weights and the speech engine's CDN files (kokoro-js, the ONNX runtime's
+ * 21 MB WebAssembly binary, the MP3 encoder) are many megabytes and are kept
+ * by the page itself, not here: see makeModelCache and assetBytes in
+ * zabaudiobooker.html, which store them in Cache Storage (under the names
+ * "transformers-cache", "kokoro-voices" and "zab-assets", never this file's)
+ * or in IndexedDB where Cache Storage is unusable. That is deliberate: a
+ * service worker only exists for served pages, whereas the page's own saving
+ * also works when it is opened as a plain file. This service worker's job is
+ * just "the app opens even with no network". Bump CACHE_NAME to ship a new
+ * shell version; the old cache is dropped on activate.
  */
 
 const CACHE_NAME = "zab-shell-v1";

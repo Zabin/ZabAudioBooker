@@ -94,19 +94,27 @@ You should see a page headed "ZabAudioBooker" with four numbered sections.
 
 ### What happens on the first run
 
-**The first time only**, your browser downloads the AI voice model. This is
-roughly 90 MB to 330 MB depending on the Precision setting. You will see a
-progress bar and a "Downloading model" message. This needs an internet
-connection and can take a few minutes.
+**The first time only**, your browser downloads two things: the AI voice model
+(roughly 90 MB to 330 MB depending on the Precision setting) and the speech
+engine that runs it (about 24 MB). You will see a progress bar and
+"Downloading…" messages. This needs an internet connection and can take a few
+minutes.
 
-After that the model is saved in your browser, and everything works offline.
-The line under the **Generate audiobook** button tells you where things stand:
-"not downloaded yet" before the first run, then "Voice model saved on this
-device" once it has been kept. On later runs the progress text says it is
-loading from "this device's saved copy" instead of downloading. If instead you
-see a warning that the browser couldn't save it, the model will download again
-every run — this usually means a private/incognito window, or a browser setting
-that blocks sites from storing data.
+After that both are saved in your browser, and generating works with no
+internet at all. The line under the **Generate audiobook** button tells you
+where things stand: "not downloaded yet" before the first run, then "Voice model
+and speech engine saved on this device … works without internet" once both have
+been kept. On later runs the progress text says it is loading from "this
+device's saved copy" instead of downloading. If you used an earlier version that
+saved only the model, the line says the speech engine isn't saved yet — click
+Generate once while online and it fetches the engine, after which offline works.
+If instead you see a warning that the browser couldn't save something, it will
+download again every run — this usually means a private/incognito window, or a
+browser setting that blocks sites from storing data.
+
+One exception: reading a **PDF** or **EPUB** loads its reader from the internet
+each time it is first used, and that is not saved. So importing those needs
+internet; generating from text already in the box does not.
 
 Once the download finishes, synthesis begins. The status line shows how much
 audio has been produced, how long it has taken, and an "RTF" figure — that is
@@ -166,7 +174,7 @@ lists each book's tracks under its own heading, and **Download every file** /
 
 | What you see | What to do |
 | --- | --- |
-| A red box saying it could not load from the CDN | You are offline, or a firewall is blocking it. The first run needs access to `cdn.jsdelivr.net` and `huggingface.co`. Connect and reload the page. |
+| A red box saying it couldn't load the speech engine (or the MP3 encoder) | The engine isn't saved on this device yet and the internet isn't reachable — or a firewall is blocking `cdn.jsdelivr.net` or `huggingface.co`. Connect once and click Generate again; after one successful online run everything is saved and works without internet. If you only need to get audio out right now, choose WAV instead of MP3 (the encoder is a separate file). |
 | Nothing happens when you click Generate | Look for the red box. If there is none, open the browser console (see [Reporting problems](TESTING.md#how-to-capture-a-useful-error)) and check for errors. |
 | The page says the download is blocked from your filesystem | Follow the yellow hint on the page: it tells you how to serve the folder locally instead. |
 | It is very slow, or the status line said "WebGPU wasn't usable here" | Your browser couldn't get graphics-card access at all for this page (not even to try), so it's using the processor instead. This happens automatically — nothing to do — and still works, just at roughly real time (an hour of audio takes about an hour) instead of a fraction of that. If your graphics card normally works fine in this browser and generation is still slow, reload the page — this switches devices only once, at the start of a run. |
@@ -192,14 +200,14 @@ put a folder on `http://localhost` for a moment.
 Serving the folder this way also lets the browser offer to **install**
 ZabAudioBooker as an app (an icon in the address bar, or "Install…" in the
 browser menu). Installed, it opens in its own window and works with no
-internet connection at all — the app itself, that is; generating still needs
-the model downloaded at least once, same as always.
+internet connection at all — the app itself, that is; generating needs the
+model and speech engine downloaded once, which the first Generate does.
 
 ### Starting over
 
-To reclaim the space the downloaded model takes, click **Clear saved model**
-(next to the status line under the Generate button). It will download again
-next time. You can also clear your browser's site data for the page (in
+To reclaim the space the downloaded model and speech engine take, click **Clear
+saved files** (next to the status line under the Generate button). They will
+download again next time. You can also clear your browser's site data for the page (in
 Chrome: **Settings → Privacy → Third-party cookies → See all site data**, then
 remove the entry), which removes it along with your remembered settings.
 

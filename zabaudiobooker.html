@@ -2611,6 +2611,16 @@ async function ensureModel(device, dtype, state, emit) {
 }
 
 async function synthSection(text, voice, speed, onChunk, state) {
+  // kokoro-js's TextSplitterStream will not end a sentence while a quote or
+  // bracket it has seen is still "open", and it counts a plural possessive
+  // (the editors' words) as an opening quote that never closes. Every
+  // sentence after it then piles into one run, which the model truncates at
+  // 510 tokens: the audio stops mid-sentence and resumes wherever the next
+  // stray apostrophe happens to close the run. Curly marks are not tracked
+  // and are normalised to the straight ones before phonemizing, so they sound
+  // identical; a mark right after sentence-ending punctuation stays straight
+  // because the splitter consumes those itself.
+  text = text.replace(/(?<![.!?\u2026])'/g, "\u2019").replace(/(?<![.!?\u2026])"/g, "\u201d");
   const splitter = new state.TextSplitterStream();
   const stream = state.tts.stream(splitter, { voice, speed });
   const chunks = [];
